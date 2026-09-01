@@ -1269,9 +1269,10 @@ function startVault(){
   player.vaultPush=push;
   player.vaultClearance=clearance;
   player.vaultT=0;
-  /* Start the camera's slow orbit before the body reaches the lip. The old
-     handoff waited until landing, then pointed the chase target back toward the
-     wall even though the character had already turned to the landing side. */
+  /* Start the camera's slow orbit before the body reaches the lip. Camera yaw
+     describes the side of the player where the chase camera sits, so the
+     outward normal places it behind a body that continues inward over the
+     obstacle. Body and camera headings intentionally use opposite signs. */
   targetYaw=Math.atan2(player.vaultNormal.x,player.vaultNormal.z);
   player.vel.set(0,0,0);player.onGround=false;
   return true;
@@ -1763,7 +1764,11 @@ function vaultStep(dt){
     player.landingSurface=landingRoot&&surfaceObjectIsLive(landingRoot)?landingRoot:null;
     player.landingAnchor.copy(player.pos);
     player.landingY=player.pos.y;
-    player.onGround=true;player.heading=Math.atan2(player.vaultNormal.x,player.vaultNormal.z);
+    /* Land facing over the obstacle. The camera remains on the outward side,
+       behind the player; using the outward normal for both headings turned the
+       character 180 degrees to face the camera on touchdown. */
+    player.onGround=true;
+    player.heading=Math.atan2(-player.vaultNormal.x,-player.vaultNormal.z);
     /* Keep the weight-bearing landing pose for a brief, live recovery window.
        Switching directly from the vault IK targets to the weapon targets on
        the next frame made the feet and shoulders pop even though the physical

@@ -759,10 +759,11 @@ function updateGuy(dt){
   let targetHeading=player.heading;
   if(climbing&&wallNormal.lengthSq()>0.001)targetHeading=Math.atan2(-wallNormal.x,-wallNormal.z);
   else if(vaulting&&player.vaultNormal.lengthSq()>0.001){
-    const wallFacing=Math.atan2(-player.vaultNormal.x,-player.vaultNormal.z);
-    const landingFacing=Math.atan2(player.vaultNormal.x,player.vaultNormal.z);
-    const faceBlend=smooth5(Math.max(0,Math.min(1,(vaultK-0.28)/0.72)));
-    targetHeading=wallFacing+angDiff(landingFacing,wallFacing)*faceBlend;
+    /* Keep moving through the ledge in the same direction the character
+       approached it. The chase camera orbits to the exterior side during a
+       mantle; reversing the body as well made the player finish by staring
+       directly into that camera. */
+    targetHeading=Math.atan2(-player.vaultNormal.x,-player.vaultNormal.z);
   }
   heading=dampAngle(heading,targetHeading,14,dt);
   guy.rotation.y=heading;
