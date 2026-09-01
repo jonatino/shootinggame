@@ -2,9 +2,12 @@
 const player={pos:V(8,0,16),vel:V(),mode:'ground',hold:-1,
   moveFrom:-1,moveTo:-1,attachT:0,moveDuration:0.36,attachFrom:V(),
   vaultFrom:V(),vaultTo:V(),vaultNormal:V(),vaultT:0,vaultDuration:0.68,vaultClearance:0.72,vaultPush:0.42,
-  vaultLandingNormal:V(0,1,0),
+  vaultLandingNormal:V(0,1,0),vaultContactNormal:V(0,1,0),
+  vaultKind:'none',vaultObstacle:null,vaultLandingMesh:null,
+  vaultContactPoint:V(),vaultDirection:V(0,0,1),
+  vaultObstacleHeight:0,vaultObstacleDepth:0,vaultEntrySpeed:0,
   vaultLeadLeft:true,
-  vaultRecovery:0,
+  vaultRecovery:0,vaultRecoveryDuration:0.28,
   landingSurface:null,landingAnchor:V(),landingY:0,landingRadius:1.35,
   climbBuffer:0,climbDir:V(),
   cool:0,grace:0,jumpGrace:0,jumpBuffer:0,onGround:true,heading:Math.PI,
@@ -422,6 +425,14 @@ function resolveColliders(ignoreA,ignoreB){
     if(!ignoreA)ignoreA=recoveryWall;
     if(!ignoreB)ignoreB=recoveryLanding;
   }
+  if(player.mode==='ground'&&player.vaultRecovery>0&&player.vaultKind==='low'){
+    const obstacle=player.vaultObstacle&&player.vaultObstacle.userData&&
+      player.vaultObstacle.userData.surfaceRoot||player.vaultObstacle;
+    const landing=player.vaultLandingMesh&&player.vaultLandingMesh.userData&&
+      player.vaultLandingMesh.userData.surfaceRoot||player.vaultLandingMesh;
+    if(!ignoreA)ignoreA=obstacle;
+    if(!ignoreB)ignoreB=landing;
+  }
   let landingProtection=false,collided=false;
   if(player.mode==='ground'&&player.onGround&&player.landingSurface){
     const dx=player.pos.x-player.landingAnchor.x,dz=player.pos.z-player.landingAnchor.z;
@@ -517,6 +528,15 @@ function isCameraFadeable(mesh){
   return !!(ud&&(ud.kind==='cell'||ud.kind==='cellShell'||ud.cameraFade||ud.staticFragment||ud.sleeping));
 }
 function isVaultCameraSurface(mesh){
+  const lowVaultRecovery=player.mode==='ground'&&player.vaultRecovery>0&&
+    player.vaultKind==='low';
+  if((player.mode==='vault'&&player.vaultKind==='low')||lowVaultRecovery){
+    const obstacle=player.vaultObstacle&&player.vaultObstacle.userData&&
+      player.vaultObstacle.userData.surfaceRoot||player.vaultObstacle;
+    const landing=player.vaultLandingMesh&&player.vaultLandingMesh.userData&&
+      player.vaultLandingMesh.userData.surfaceRoot||player.vaultLandingMesh;
+    return !!mesh&&colliderMatchesSurface(mesh,obstacle,landing);
+  }
   const traversing=player.mode==='attach'||player.mode==='move'||player.mode==='hang'||player.mode==='vault';
   /* Keep the wall/landing out of the chase-camera collision for the brief
      post-mantle recovery. The player has just crossed that plane; letting the
@@ -841,6 +861,14 @@ const climbPathSurfaceFrom=V(),climbPathSurfaceTo=V(),climbPathSurface=V();
 const vaultPathNormal=V(),vaultPathSample=V(),vaultTargetProbe=V(),vaultTargetRay=V();
 const vaultDesiredPos=V(),vaultMotionFrom=V(),vaultMotionDelta=V();
 const vaultExitVelocity=V();
+const lowVaultForward=V(),lowVaultProbeOrigin=V(),lowVaultProbePoint=V();
+const lowVaultProbeNormal=V(0,1,0),lowVaultFrontPoint=V(),lowVaultTopPoint=V();
+const lowVaultTopNormal=V(0,1,0),lowVaultLandingPoint=V(),lowVaultLandingNormal=V(0,1,0);
+let lowVaultProbeMesh=null;
+const AUTO_VAULT_MIN_HEIGHT=PLAYER_STEP_HEIGHT+0.055;
+const AUTO_VAULT_MAX_HEIGHT=1.32;
+const AUTO_VAULT_MAX_DEPTH=1.55;
+const AUTO_VAULT_DEPTH_STEP=0.12;
 const climbDesiredPos=V(),climbMotionFrom=V(),climbMotionDelta=V();
 const climbGrabOrigin=V(),climbGrabSide=V(),climbGrabRay=V(),climbGrabCandidate=V(),climbGrabCandidateDir=V();
 function holdSurfaceRoot(h){
@@ -1226,6 +1254,207 @@ function vaultPathClearance(h,from,to,clearance,push){
   return true;
 }
 
+function lowVaultSurfaceRoot(mesh){
+  return mesh&&mesh.userData&&mesh.userData.surfaceRoot||mesh||null;
+}
+function lowVaultSameSurface(mesh,surface){
+  return !!mesh&&!!surface&&colliderMatchesSurface(mesh,surface,null);
+}
+function lowVaultSurfaceStable(mesh){
+  if(!surfaceObjectIsLive(mesh))return false;
+  const ud=mesh.userData||{};
+  /* A body that can translate underneath the player is not a vault. Frozen
+     fracture pieces are safe to use, but active chunks and detached voxel
+     islands must finish settling before traversal can depend on them. */
+  if(ud.voxelChunk||ud.kind==='voxelChunk')return false;
+  if(ud.released&&!ud.sleeping&&!ud.staticFragment)return false;
+  return true;
+}
+function lowVaultProbeDown(x,z,fromY,far,requiredSurface,expectedY,tolerance){
+  lowVaultProbeOrigin.set(x,fromY,z);
+  rc.set(lowVaultProbeOrigin,DOWN);rc.far=far;rc.near=0.001;
+  const hits=rc.intersectObjects(
+    getCameraOccluderCandidates(lowVaultProbeOrigin,DOWN,far),false);
+  lowVaultProbeMesh=null;
+  for(const hit of hits){
+    if(!hit.face)continue;
+    const normal=wn(hit,hit.object,worldNormalScratch);
+    if(normal.y<=0.62)continue;
+    if(requiredSurface&&!lowVaultSameSurface(hit.object,requiredSurface))continue;
+    if(Number.isFinite(expectedY)&&Math.abs(hit.point.y-expectedY)>tolerance)continue;
+    if(!lowVaultSurfaceStable(hit.object))continue;
+    lowVaultProbePoint.copy(hit.point);
+    lowVaultProbeNormal.copy(normal).normalize();
+    lowVaultProbeMesh=hit.object;
+    return true;
+  }
+  return false;
+}
+function lowVaultLandingAt(x,z,fromY,far,obstacleSurface){
+  lowVaultProbeOrigin.set(x,fromY,z);
+  rc.set(lowVaultProbeOrigin,DOWN);rc.far=far;rc.near=0.001;
+  const hits=rc.intersectObjects(
+    getCameraOccluderCandidates(lowVaultProbeOrigin,DOWN,far),false);
+  lowVaultProbeMesh=null;
+  for(const hit of hits){
+    if(!hit.face)continue;
+    const normal=wn(hit,hit.object,worldNormalScratch);
+    if(normal.y<=0.62)continue;
+    /* The first physical top under the landing footprint owns the result. Do
+       not ray through an unsafe moving/high surface and silently choose the
+       ground below it. */
+    if(lowVaultSameSurface(hit.object,obstacleSurface)||
+       !lowVaultSurfaceStable(hit.object))return false;
+    lowVaultProbePoint.copy(hit.point);
+    lowVaultProbeNormal.copy(normal).normalize();
+    lowVaultProbeMesh=hit.object;
+    return true;
+  }
+  return false;
+}
+function lowVaultPathClearance(from,to,clearance,push,obstacle,landing){
+  const obstacleRoot=lowVaultSurfaceRoot(obstacle);
+  const landingRoot=lowVaultSurfaceRoot(landing);
+  vaultPathNormal.copy(lowVaultForward).negate();
+  /* Low vaults use linear forward progress so the root never pauses at either
+     end. The vertical arc represents a tucked pelvis; the validated obstacle
+     is intentionally allowed beneath it while every unrelated collider still
+     tests against the full player volume. */
+  for(let i=1;i<=18;i++){
+    const t=i/18;
+    vaultPathSample.lerpVectors(from,to,t);
+    vaultPathSample.y+=4*t*(1-t)*clearance;
+    vaultPathSample.addScaledVector(vaultPathNormal,-Math.sin(t*Math.PI)*push);
+    for(const box of boxes){
+      if(box.active===false)continue;
+      if(settledBoxSet.has(box)||
+         colliderMatchesSurface(box.owner,obstacleRoot,landingRoot))continue;
+      if(playerOverlapsBox(vaultPathSample,box))return false;
+    }
+    for(const cyl of cyls){
+      if(colliderMatchesSurface(cyl.mesh,obstacleRoot,landingRoot))continue;
+      if(playerOverlapsCylinder(vaultPathSample,cyl))return false;
+    }
+    for(const c of chunks){
+      if(colliderMatchesSurface(c,obstacleRoot,landingRoot))continue;
+      if(playerOverlapsChunk(vaultPathSample,c.userData))return false;
+    }
+    for(const c of settledFragments){
+      if(colliderMatchesSurface(c,obstacleRoot,landingRoot))continue;
+      if(playerOverlapsChunk(vaultPathSample,c.userData))return false;
+    }
+  }
+  return true;
+}
+function tryAutoLowVault(dir,speed){
+  if(player.mode!=='ground'||!player.onGround||dir.lengthSq()<0.01||speed<4.2||
+     player.cool>0||player.grace>0||player.vaultRecovery>0||player.jumpBuffer>0)return false;
+  lowVaultForward.copy(dir).setY(0);
+  if(lowVaultForward.lengthSq()<0.01)return false;
+  lowVaultForward.normalize();
+  const baseY=player.pos.y;
+  const lookAhead=Math.max(0.78,Math.min(1.08,0.64+speed*0.017));
+  lowVaultProbeOrigin.copy(player.pos).addScaledVector(UP,0.34);
+  rc.set(lowVaultProbeOrigin,lowVaultForward);rc.far=lookAhead;rc.near=0.02;
+  const hits=rc.intersectObjects(
+    getCameraOccluderCandidates(lowVaultProbeOrigin,lowVaultForward,lookAhead),false);
+  let obstacle=null;
+  for(const hit of hits){
+    if(!hit.face||hit.object===ground||!lowVaultSurfaceStable(hit.object))continue;
+    lowVaultProbeNormal.copy(wn(hit,hit.object,worldNormalScratch)).setY(0);
+    if(lowVaultProbeNormal.lengthSq()<0.2)continue;
+    lowVaultProbeNormal.normalize();
+    if(lowVaultProbeNormal.dot(lowVaultForward)>-0.3)continue;
+    obstacle=hit.object;
+    lowVaultFrontPoint.copy(hit.point);
+    break;
+  }
+  if(!obstacle)return false;
+  const obstacleRoot=lowVaultSurfaceRoot(obstacle);
+  const probeY=baseY+AUTO_VAULT_MAX_HEIGHT+0.42;
+  const probeFar=AUTO_VAULT_MAX_HEIGHT+0.78;
+  lowVaultProbePoint.copy(lowVaultFrontPoint).addScaledVector(lowVaultForward,0.07);
+  if(!lowVaultProbeDown(lowVaultProbePoint.x,lowVaultProbePoint.z,probeY,probeFar,
+    obstacleRoot,NaN,0))return false;
+  lowVaultTopPoint.copy(lowVaultProbePoint);
+  lowVaultTopNormal.copy(lowVaultProbeNormal);
+  const obstacleHeight=lowVaultTopPoint.y-baseY;
+  if(obstacleHeight<AUTO_VAULT_MIN_HEIGHT||obstacleHeight>AUTO_VAULT_MAX_HEIGHT)return false;
+
+  let lastSolid=0.07,edgeDepth=-1,depthMisses=0;
+  for(let depth=0.07+AUTO_VAULT_DEPTH_STEP;
+      depth<=AUTO_VAULT_MAX_DEPTH+AUTO_VAULT_DEPTH_STEP;depth+=AUTO_VAULT_DEPTH_STEP){
+    lowVaultProbePoint.copy(lowVaultFrontPoint).addScaledVector(lowVaultForward,depth);
+    if(lowVaultProbeDown(lowVaultProbePoint.x,lowVaultProbePoint.z,probeY,probeFar,
+      obstacleRoot,lowVaultTopPoint.y,0.24)){
+      lastSolid=depth;
+      depthMisses=0;
+      continue;
+    }
+    /* Voxel instances intentionally leave a tiny visual bevel between cells.
+       One downward ray can land in that seam, so require a second consecutive
+       miss before declaring the obstacle finished. */
+    depthMisses++;
+    if(depthMisses>=2){
+      edgeDepth=lastSolid+AUTO_VAULT_DEPTH_STEP*0.5;
+      break;
+    }
+  }
+  /* A narrow hand/foot contact is still vaultable, but a surface that remains
+     solid beyond this budget is a platform or building and must use climbing. */
+  if(edgeDepth<0.15||edgeDepth>AUTO_VAULT_MAX_DEPTH)return false;
+  const landingDistance=edgeDepth+0.62;
+  lowVaultProbePoint.copy(lowVaultFrontPoint).addScaledVector(lowVaultForward,landingDistance);
+  const landingProbeY=Math.max(baseY,lowVaultTopPoint.y)+0.86;
+  const landingProbeFar=landingProbeY-baseY+0.62;
+  if(!lowVaultLandingAt(lowVaultProbePoint.x,lowVaultProbePoint.z,
+    landingProbeY,landingProbeFar,obstacleRoot))return false;
+  lowVaultLandingPoint.copy(lowVaultProbePoint);
+  lowVaultLandingNormal.copy(lowVaultProbeNormal);
+  const landingDelta=lowVaultLandingPoint.y-baseY;
+  if(landingDelta<-0.42||landingDelta>0.36)return false;
+
+  const heightBlend=Math.max(0,Math.min(1,
+    (obstacleHeight-AUTO_VAULT_MIN_HEIGHT)/(AUTO_VAULT_MAX_HEIGHT-AUTO_VAULT_MIN_HEIGHT)));
+  const speedBlend=Math.max(0,Math.min(1,
+    (speed-7)/(PLAYER_SPRINT_SPEED-7)));
+  const depthBlend=Math.max(0,Math.min(1,edgeDepth/AUTO_VAULT_MAX_DEPTH));
+  const clearance=0.48+heightBlend*0.2+speedBlend*0.055;
+  const push=0.07+depthBlend*0.1;
+  lowVaultLandingPoint.addScaledVector(UP,0.02);
+  if(!lowVaultPathClearance(player.pos,lowVaultLandingPoint,clearance,push,
+    obstacle,lowVaultProbeMesh))return false;
+
+  player.vaultLeadLeft=!player.vaultLeadLeft;
+  player.vaultKind='low';
+  player.vaultObstacle=obstacle;
+  player.vaultLandingMesh=lowVaultProbeMesh;
+  player.vaultContactPoint.copy(lowVaultTopPoint).addScaledVector(lowVaultForward,
+    Math.min(0.2,edgeDepth*0.32)).addScaledVector(lowVaultTopNormal,0.035);
+  player.vaultContactNormal.copy(lowVaultTopNormal);
+  player.vaultDirection.copy(lowVaultForward);
+  player.vaultNormal.copy(lowVaultForward).negate();
+  player.vaultLandingNormal.copy(lowVaultLandingNormal);
+  player.vaultObstacleHeight=obstacleHeight;
+  player.vaultObstacleDepth=edgeDepth;
+  player.vaultEntrySpeed=speed;
+  player.vaultFrom.copy(player.pos);
+  player.vaultTo.copy(lowVaultLandingPoint);
+  player.vaultDuration=Math.max(0.3,Math.min(0.44,
+    0.39-speedBlend*0.075+heightBlend*0.035+depthBlend*0.025));
+  player.vaultClearance=clearance;
+  player.vaultPush=push;
+  player.vaultT=0;
+  player.vaultRecovery=0;
+  player.vaultRecoveryDuration=0.18;
+  player.mode='vault';
+  player.hold=-1;player.moveFrom=-1;player.moveTo=-1;
+  player.vel.set(0,0,0);player.onGround=false;
+  player.landingSurface=null;player.climbBuffer=0;
+  player.heading=Math.atan2(lowVaultForward.x,lowVaultForward.z);
+  return true;
+}
+
 function refreshVaultTarget(h){
   if(!h||!h.vault||!h.vaultMesh)return false;
   /* The graph is cooked at load time, but a roof or a settled fragment can
@@ -1289,6 +1518,17 @@ function startVault(){
   /* Alternate the plant side so repeated mantles do not use one fixed
      mannequin pose. The hand and foot timing below follow this side. */
   player.vaultLeadLeft=!player.vaultLeadLeft;
+  player.vaultKind='mantle';
+  player.vaultObstacle=holdSurfaceRoot(h);
+  player.vaultLandingMesh=h.vaultMesh;
+  player.vaultContactPoint.copy(climbSurfacePoint);
+  player.vaultContactNormal.copy(player.vaultLandingNormal);
+  player.vaultDirection.copy(player.vaultNormal).negate().setY(0).normalize();
+  player.vaultObstacleHeight=rise;
+  player.vaultObstacleDepth=horizontal;
+  player.vaultEntrySpeed=0;
+  player.vaultRecovery=0;
+  player.vaultRecoveryDuration=0.28;
   player.mode='vault';
   player.vaultFrom.copy(player.pos);
   player.vaultTo.copy(h.vault);
@@ -1464,6 +1704,9 @@ const PLAYER_GROUND_BRAKE=72;
 
 function groundStep(dt,dir){
   const run=(keys.ShiftLeft||keys.ShiftRight);
+  if(player.vaultRecovery<=0&&player.vaultKind==='low'){
+    player.vaultKind='none';player.vaultObstacle=null;player.vaultLandingMesh=null;
+  }
   /* Combat movement needs to cross this large arena decisively. These are
      deliberate gameplay speeds, not animation multipliers: ordinary WASD is
      already quick and Shift is a genuinely fast sprint. */
@@ -1477,9 +1720,13 @@ function groundStep(dt,dir){
      zeroed. Let held movement input build back over the same recovery window;
      applying full sprint acceleration on the first ground frame can pull the
      player straight back off a narrow ledge before the landing pose settles. */
+  const recoveryDuration=Math.max(0.01,player.vaultRecoveryDuration||0.28);
   const recoveryT=player.vaultRecovery>0?
-    Math.max(0,Math.min(1,1-player.vaultRecovery/0.28)):1;
-  const recoveryInput=player.vaultRecovery>0?
+    Math.max(0,Math.min(1,1-player.vaultRecovery/recoveryDuration)):1;
+  /* A low vault exits with live running momentum. Its recovery is purely a
+     body-pose blend; throttling the input here would recreate the exact hitch
+     the automatic traversal is meant to remove. */
+  const recoveryInput=player.vaultRecovery>0&&player.vaultKind!=='low'?
     lerp(0.15,1,smooth5(recoveryT)):1;
   const desiredX=dir.x*spd*recoveryInput,desiredZ=dir.z*spd*recoveryInput;
   const velocityBeforeX=player.vel.x,velocityBeforeZ=player.vel.z;
@@ -1499,6 +1746,13 @@ function groundStep(dt,dir){
   const targetAccelZ=Math.max(-1,Math.min(1,(player.vel.z-velocityBeforeZ)*accelScale));
   movementAccelWorld.x=dampValue(movementAccelWorld.x,targetAccelX,18,dt);
   movementAccelWorld.z=dampValue(movementAccelWorld.z,targetAccelZ,18,dt);
+  const autoVaultSpeed=Math.hypot(player.vel.x,player.vel.z);
+  if(hasInput&&tryAutoLowVault(dir,autoVaultSpeed)){
+    moveSpeed+=(autoVaultSpeed-moveSpeed)*Math.min(1,dt*8);
+    walkAmt=autoVaultSpeed;
+    sprinting=false;camRollTarget=0;
+    return;
+  }
   player.vel.y-=22*dt;
   const py=player.pos.y;
   /* Sweep fast ground motion in short deterministic increments. The old
@@ -1728,13 +1982,17 @@ function moveStep(dt){
 }
 
 function vaultStep(dt){
-  const h=HOLDS[player.hold];
-  if(!holdSurfaceIsLive(h)||(h.vaultMesh&&!surfaceObjectIsLive(h.vaultMesh))){
+  const lowVault=player.vaultKind==='low';
+  const h=lowVault?null:HOLDS[player.hold];
+  if(!lowVault&&(!holdSurfaceIsLive(h)||
+     (h.vaultMesh&&!surfaceObjectIsLive(h.vaultMesh)))){
     releaseTraversal(h);return;
   }
   player.vaultT+=dt/player.vaultDuration;
   const k=Math.min(1,player.vaultT);
-  const s=smooth5(k);
+  /* An automatic speed vault carries forward momentum through both endpoints;
+     the handhold mantle keeps its deliberate pull-up easing. */
+  const s=lowVault?k:smooth5(k);
   vaultDesiredPos.lerpVectors(player.vaultFrom,player.vaultTo,s);
   vaultDesiredPos.y+=4*k*(1-k)*player.vaultClearance;
   /* Clear the lip at mid-vault by travelling through the wall plane, then
@@ -1749,8 +2007,9 @@ function vaultStep(dt){
   const vaultDistance=vaultMotionDelta.length();
   const vaultSteps=Math.max(1,Math.min(4,Math.ceil(vaultDistance/0.16)));
   vaultMotionDelta.multiplyScalar(1/vaultSteps);
-  const vaultWall=holdSurfaceRoot(h),vaultLanding=h.vaultMesh&&
-    (h.vaultMesh.userData&&h.vaultMesh.userData.surfaceRoot||h.vaultMesh);
+  const vaultWall=lowVault?lowVaultSurfaceRoot(player.vaultObstacle):holdSurfaceRoot(h);
+  const landingObject=lowVault?player.vaultLandingMesh:h.vaultMesh;
+  const vaultLanding=lowVaultSurfaceRoot(landingObject);
   for(let i=0;i<vaultSteps;i++){
     /* Advance from the corrected position, rather than repeatedly rebuilding
        the same interpolation from vaultMotionFrom. This preserves a shove from
@@ -1759,26 +2018,37 @@ function vaultStep(dt){
     resolveColliders(vaultWall,vaultLanding);
   }
   if(k>=1){
-    const wallRoot=holdSurfaceRoot(h);
-    const landingObject=h.vaultMesh;
-    const landingRoot=landingObject&&landingObject.userData&&landingObject.userData.surfaceRoot||landingObject;
+    const wallRoot=vaultWall;
+    const landingRoot=vaultLanding;
     /* The target was just validated against this top face. Do not let a
        higher shelf behind the lip win the first downward ray and yank the
        player upward at the last frame of the mantle. */
-    const landingY=groundBelow(player.pos.x,player.pos.z,player.pos.y+0.6,player.vaultTo.y+0.28);
+    const landingY=groundBelow(player.pos.x,player.pos.z,
+      player.pos.y+0.6,player.vaultTo.y+0.28);
     /* Preserve the body’s forward travel across the lip. The old zero-velocity
        handoff made a mantle visibly pause on the landing frame and forced the
        recovery pose to restart movement from rest. Use the horizontal tangent
        of the authored vault path as a modest exit impulse; normal ground
        resolution and the recovery blend still own the final contact. */
-    vaultExitVelocity.subVectors(player.vaultTo,player.vaultFrom).setY(0);
-    const exitDistance=vaultExitVelocity.length();
-    if(exitDistance>0.001)
-      vaultExitVelocity.multiplyScalar(Math.min(2.8,Math.max(0.65,
-        exitDistance/Math.max(0.42,player.vaultDuration)*0.95))/exitDistance);
-    else vaultExitVelocity.set(0,0,0);
+    if(lowVault){
+      vaultExitVelocity.copy(player.vaultDirection).setY(0);
+      if(vaultExitVelocity.lengthSq()<0.001)
+        vaultExitVelocity.subVectors(player.vaultTo,player.vaultFrom).setY(0);
+      if(vaultExitVelocity.lengthSq()>0.001){
+        vaultExitVelocity.normalize().multiplyScalar(Math.max(8,
+          Math.min(PLAYER_SPRINT_SPEED,player.vaultEntrySpeed*0.88)));
+      }else vaultExitVelocity.set(0,0,0);
+    }else{
+      vaultExitVelocity.subVectors(player.vaultTo,player.vaultFrom).setY(0);
+      const exitDistance=vaultExitVelocity.length();
+      if(exitDistance>0.001)
+        vaultExitVelocity.multiplyScalar(Math.min(2.8,Math.max(0.65,
+          exitDistance/Math.max(0.42,player.vaultDuration)*0.95))/exitDistance);
+      else vaultExitVelocity.set(0,0,0);
+    }
     player.mode='ground';player.vel.copy(vaultExitVelocity);
-    if(landingY>0)player.pos.y=landingY;
+    if(lowVault)player.pos.y=landingY;
+    else if(landingY>0)player.pos.y=landingY;
     /* The mantle is intentionally crossing these two surfaces. Resolving them
        as a side collision on the same frame pushes the player off the ledge
        before the next ground probe, which looked like a teleport to y=0. Keep
@@ -1786,30 +2056,40 @@ function vaultStep(dt){
        the handoff. */
     resolveColliders(wallRoot,landingRoot);
     const finalGround=groundBelow(player.pos.x,player.pos.z,player.pos.y+0.6,player.vaultTo.y+0.28);
-    if(finalGround>0)player.pos.y=finalGround;
+    if(lowVault)player.pos.y=finalGround;
+    else if(finalGround>0)player.pos.y=finalGround;
     else if(landingY>0)player.pos.y=landingY;
     player.landingSurface=landingRoot&&surfaceObjectIsLive(landingRoot)?landingRoot:null;
     player.landingAnchor.copy(player.pos);
     player.landingY=player.pos.y;
+    player.landingRadius=lowVault?0.9:1.35;
     /* Land facing over the obstacle. The camera remains on the outward side,
        behind the player; using the outward normal for both headings turned the
        character 180 degrees to face the camera on touchdown. */
     player.onGround=true;
-    player.heading=Math.atan2(-player.vaultNormal.x,-player.vaultNormal.z);
+    player.heading=lowVault?
+      Math.atan2(player.vaultDirection.x,player.vaultDirection.z):
+      Math.atan2(-player.vaultNormal.x,-player.vaultNormal.z);
     /* Keep the weight-bearing landing pose for a brief, live recovery window.
        Switching directly from the vault IK targets to the weapon targets on
        the next frame made the feet and shoulders pop even though the physical
        root had landed correctly. */
-    player.vaultRecovery=0.28;
+    player.vaultRecoveryDuration=lowVault?0.18:0.28;
+    player.vaultRecovery=player.vaultRecoveryDuration;
     /* Keep the chase camera on the same landing-side orbit that was eased in
        during the mantle. Resetting to the wall-facing yaw here made the camera
        reverse direction on the exact frame the feet reached the top surface. */
-    targetYaw=Math.atan2(player.vaultNormal.x,player.vaultNormal.z);
-    landingKick=0.32;
+    if(!lowVault)targetYaw=Math.atan2(player.vaultNormal.x,player.vaultNormal.z);
+    landingKick=lowVault?0.2:0.32;
     /* Give the camera enough time to complete its orbit around the landing
        side before normal obstruction correction resumes. Movement remains
        live during this window; only the just-cleared mantle corridor is
        treated as recoverable camera space. */
-    player.cool=0.25;player.grace=1.8;
+    player.cool=lowVault?0.14:0.25;
+    player.grace=lowVault?0.18:1.8;
+    if(lowVault){
+      moveSpeed=Math.max(moveSpeed,vaultExitVelocity.length());
+      walkAmt=vaultExitVelocity.length();
+    }
   }
 }

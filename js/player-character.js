@@ -638,13 +638,24 @@ function updateGuy(dt){
   const moving=mode==='attach'||mode==='move';
   const vaultRecover=mode==='ground'&&player.vaultRecovery>0;
   const vaulting=mode==='vault'||vaultRecover;
+  const lowVault=vaulting&&player.vaultKind==='low';
   const vaultK=vaulting?(mode==='vault'?Math.max(0,Math.min(1,player.vaultT)):1):0;
   const vaultArc=4*vaultK*(1-vaultK);
+  const vaultHeightBlend=lowVault?Math.max(0,Math.min(1,
+    (player.vaultObstacleHeight-AUTO_VAULT_MIN_HEIGHT)/
+    (AUTO_VAULT_MAX_HEIGHT-AUTO_VAULT_MIN_HEIGHT))):0;
+  const vaultSpeedBlend=lowVault?Math.max(0,Math.min(1,
+    (player.vaultEntrySpeed-7)/(PLAYER_SPRINT_SPEED-7))):0;
+  const lowVaultPlantLeft=!player.vaultLeadLeft;
+  const lowVaultSide=lowVaultPlantLeft?1:-1;
   /* The first ground frame after a mantle carries the landing load. Keep that
      load separate from the airborne arc so the pelvis/knees compress and
      recover smoothly instead of snapping from vault pose to idle pose. */
-  const vaultLandingElapsed=vaultRecover?Math.max(0,0.28-player.vaultRecovery):0;
-  const vaultLandingLoad=vaultRecover?Math.exp(-vaultLandingElapsed*11):0;
+  const vaultRecoveryDuration=Math.max(0.01,player.vaultRecoveryDuration||0.28);
+  const vaultLandingElapsed=vaultRecover?Math.max(0,
+    vaultRecoveryDuration-player.vaultRecovery):0;
+  const vaultLandingLoad=vaultRecover?
+    Math.exp(-vaultLandingElapsed*(lowVault?16:11)):0;
   const walking=mode==='ground'&&player.onGround&&walkAmt>0.01;
   const inAir=mode==='ground'&&!player.onGround;
   weaponSprint=dampValue(weaponSprint,sprinting?1:0,10,dt);
@@ -693,8 +704,10 @@ function updateGuy(dt){
      joints as two fixed pins. The positional shift is deliberately small; it
      gives the IK chain room to pull through the shoulder without making the
      arms detach from the vest. */
-  const shoulderLoadL=climbing?climbLiftL*0.035:(vaulting?(player.vaultLeadLeft?0.045:0.018):0);
-  const shoulderLoadR=climbing?climbLiftR*0.035:(vaulting?(player.vaultLeadLeft?0.018:0.045):0);
+  const shoulderLoadL=climbing?climbLiftL*0.035:(vaulting?
+    (lowVault?(lowVaultPlantLeft?0.065:0.022):(player.vaultLeadLeft?0.045:0.018)):0);
+  const shoulderLoadR=climbing?climbLiftR*0.035:(vaulting?
+    (lowVault?(lowVaultPlantLeft?0.022:0.065):(player.vaultLeadLeft?0.018:0.045)):0);
   const groundShoulderLift=walking?gait*(0.022+runGait*0.026):0;
   const groundShoulderTravel=walking?gaitCos*(0.018+runGait*0.03):0;
   /* A mantle owns both hands until its landing recovery is finished. Treating
@@ -863,8 +876,12 @@ function updateGuy(dt){
     targetTiltZ=climbCycle*0.055+climbHangSway*0.018+Math.sin(now*1.4)*0.018+
       (moving?(0.08-0.16*climbTransfer)*climbLoad:0);
   }else if(vaulting){
-    targetTiltX=0.16+vaultArc*0.14-vaultLandingLoad*0.05;
-    targetTiltZ=0.035+Math.sin(vaultK*Math.PI)*0.025;
+    targetTiltX=lowVault?
+      0.2+vaultArc*(0.17+vaultSpeedBlend*0.08)-vaultLandingLoad*0.075:
+      0.16+vaultArc*0.14-vaultLandingLoad*0.05;
+    targetTiltZ=lowVault?
+      lowVaultSide*Math.sin(vaultK*Math.PI)*(0.075+vaultHeightBlend*0.045):
+      0.035+Math.sin(vaultK*Math.PI)*0.025;
   }else{
     targetTiltX=Math.max(-0.08,Math.min(0.14,
       forwardLoad*0.075+movementAccel*0.025+accelForward*0.045+(sprinting?0.035:(walking?0.018:0))+
@@ -884,32 +901,40 @@ function updateGuy(dt){
   pack.position.y=1.28+breath*0.5;
 
   const pelvisBob=climbing?Math.sin(now*1.8)*0.012-climbCompression*0.04:
-    (vaulting?vaultArc*0.03-vaultLandingLoad*0.06:bodyBounce*0.45-landingKick*0.055);
+    (vaulting?vaultArc*(lowVault?0.075:0.03)-vaultLandingLoad*(lowVault?0.085:0.06):
+      bodyBounce*0.45-landingKick*0.055);
   pelvis.position.y=dampValue(pelvis.position.y,0.92+pelvisBob,14,dt);
   pelvis.rotation.x=dampValue(pelvis.rotation.x,
-    climbing?0.04-climbLoad*0.08:(vaulting?0.025:gaitPitch-recoilLoad*0.018),10,dt);
+    climbing?0.04-climbLoad*0.08:(vaulting?(lowVault?0.08+vaultArc*0.07:0.025):
+      gaitPitch-recoilLoad*0.018),10,dt);
   pelvis.rotation.y=dampAngle(pelvis.rotation.y,
-    climbing?(0.08-0.16*climbTransfer)*climbLoad:-gaitYaw,10,dt);
+    climbing?(0.08-0.16*climbTransfer)*climbLoad:
+      (lowVault?lowVaultSide*vaultArc*(0.12+vaultSpeedBlend*0.08):-gaitYaw),10,dt);
   pelvis.rotation.z=dampValue(pelvis.rotation.z,climbing?climbCycle*0.07+climbHangSway*0.02:
-    (walking?-gaitRoll+groundSideLean:Math.sin(now*1.5)*0.012)+recoilRoll*0.16,10,dt);
+    (lowVault?-lowVaultSide*vaultArc*(0.08+vaultHeightBlend*0.04):
+      (walking?-gaitRoll+groundSideLean:Math.sin(now*1.5)*0.012))+recoilRoll*0.16,10,dt);
   torso.position.y=dampValue(torso.position.y,1.18+bodyBounce*0.35-landingKick*0.04-
     vaultLandingLoad*0.045-climbCompression*0.035-recoilLoad*0.018,14,dt);
   torso.rotation.x=dampValue(torso.rotation.x,climbing?-0.07:
-    (vaulting?-0.12-vaultLandingLoad*0.08:
+    (vaulting?(lowVault?-0.18-vaultArc*0.09-vaultLandingLoad*0.1:
+      -0.12-vaultLandingLoad*0.08):
       (inAir?0.06:-gaitPitch*0.55-landingKick*0.14-recoilLoad*0.07)+weaponReady*aimPitch*0.08),10,dt);
   torso.rotation.y=dampAngle(torso.rotation.y,
       climbing?aimYaw*0.12+climbCycle*0.1-climbLoad*0.12:
-        aimYaw*0.16-accelSide*0.08+gaitYaw*0.82,9,dt);
+        (lowVault?-lowVaultSide*vaultArc*(0.14+vaultSpeedBlend*0.1):
+          aimYaw*0.16-accelSide*0.08+gaitYaw*0.82),9,dt);
   torso.rotation.z=dampValue(torso.rotation.z,
     climbing?climbCycle*0.03-climbLoad*0.11:
-      (walking?gaitRoll*0.82+groundSideLean*0.55:groundSideLean*0.35)+recoilRoll*0.55,9,dt);
+      (lowVault?lowVaultSide*vaultArc*(0.065+vaultHeightBlend*0.04):
+        (walking?gaitRoll*0.82+groundSideLean*0.55:groundSideLean*0.35))+recoilRoll*0.55,9,dt);
   head.position.y=dampValue(head.position.y,1.78+bodyBounce*0.18-landingKick*0.03-
     climbCompression*0.016-recoilLoad*0.012,14,dt);
   head.rotation.y=dampAngle(head.rotation.y,Math.max(-0.75,Math.min(0.75,aimYaw*(climbing?0.7:0.45))),11,dt);
   head.rotation.x=dampValue(head.rotation.x,Math.max(-0.45,Math.min(0.55,
     aimPitch*0.42+(climbing?-0.08:0)-recoilPitch*0.3-recoilLoad*0.02)),11,dt);
   head.rotation.z=dampValue(head.rotation.z,
-    (walking?-gaitRoll*0.38:Math.sin(now*1.1)*0.01)+recoilRoll*0.35,10,dt);
+    (lowVault?-lowVaultSide*vaultArc*0.045:
+      (walking?-gaitRoll*0.38:Math.sin(now*1.1)*0.01))+recoilRoll*0.35,10,dt);
   const hipY=0.92-landingKick*0.055-climbCompression*0.025;
   const hipLift=walking?gaitCos*(0.008+runGait*0.006):0;
   const hipTravel=walking?gait*(0.025+runGait*0.025):0;
@@ -1105,17 +1130,49 @@ function updateGuy(dt){
     alignFootSurface(legL,moving?wallNormal:climbFootNormalL,limbBlend*0.8);
     alignFootSurface(legR,moving?wallNormal:climbFootNormalR,limbBlend*0.8);
   }else if(vaulting){
-    /* Plant both hands on the real lip rather than on a fixed local pose. The
-       anchor follows the surface normal, so a mantle around a corner keeps the
-       palms outside the wall and the shoulders do not drive through it. */
-    const vaultHold=HOLDS[player.hold];
+    /* A mantle plants both hands on its lip. A running low vault instead uses
+       one early weight-bearing palm while the other arm counter-swings; which
+       side plants alternates with the lead leg so chained vaults stay alive. */
+    const vaultHold=lowVault?null:HOLDS[player.hold];
     /* The wrist follows the same lead/trail schedule as the hand target. If
        both palms rotate together, the lead hand leaves the lip while still
        facing the wall and the forearm twists through the chest on release. */
     const releaseLead=smooth5(Math.max(0,Math.min(1,(vaultK-0.18)/0.32)));
     const releaseTrail=smooth5(Math.max(0,Math.min(1,(vaultK-0.28)/0.34)));
     const handPush=vaultArc*0.08;
-    if(vaultHold){
+    if(lowVault){
+      const plantEngage=smooth5(Math.max(0,Math.min(1,vaultK/0.13)));
+      const plantRelease=smooth5(Math.max(0,Math.min(1,(vaultK-0.38)/0.25)));
+      const freeSweep=Math.sin(vaultK*Math.PI);
+      climbSideAxis.crossVectors(UP,player.vaultNormal);
+      if(climbSideAxis.lengthSq()<0.04)climbSideAxis.set(1,0,0);
+      else climbSideAxis.normalize();
+      vaultHandWorldL.copy(player.vaultContactPoint)
+        .addScaledVector(climbSideAxis,-0.16);
+      vaultHandWorldR.copy(player.vaultContactPoint)
+        .addScaledVector(climbSideAxis,0.16);
+      if(lowVaultPlantLeft){
+        toTiltLocal(vaultHandWorldL,handTargetL);
+        vaultBraceL.set(0.3,1.18,0.38);
+        handTargetL.lerp(vaultBraceL,1-plantEngage);
+        vaultBraceL.set(0.34,1.4+vaultArc*0.04,0.2);
+        handTargetL.lerp(vaultBraceL,plantRelease);
+        handTargetR.set(-0.35,1.2+vaultArc*(0.22+vaultSpeedBlend*0.08),
+          0.31+freeSweep*0.24);
+      }else{
+        toTiltLocal(vaultHandWorldR,handTargetR);
+        vaultBraceR.set(-0.3,1.18,0.38);
+        handTargetR.lerp(vaultBraceR,1-plantEngage);
+        vaultBraceR.set(-0.34,1.4+vaultArc*0.04,0.2);
+        handTargetR.lerp(vaultBraceR,plantRelease);
+        handTargetL.set(0.35,1.2+vaultArc*(0.22+vaultSpeedBlend*0.08),
+          0.31+freeSweep*0.24);
+      }
+      bendVaultL.set(1.02,-0.12,lowVaultPlantLeft?-0.7:-0.46);
+      bendVaultR.set(-1.02,-0.12,lowVaultPlantLeft?-0.46:-0.7);
+    }else if(vaultHold){
+      bendVaultL.set(1,-0.08,-0.55);
+      bendVaultR.set(-1,-0.08,-0.55);
       holdSurfaceAnchor(vaultHold,climbSurfacePoint,climbSurfaceNormal);
       climbSideAxis.crossVectors(UP,player.vaultNormal).normalize();
       vaultHandWorldL.copy(climbSurfacePoint)
@@ -1139,40 +1196,61 @@ function updateGuy(dt){
     }else{
       handTargetL.set(0.28,1.22+handPush,0.34+handPush);
       handTargetR.set(-0.28,1.17+handPush*0.7,0.37+handPush);
+      bendVaultL.set(1,-0.08,-0.55);
+      bendVaultR.set(-1,-0.08,-0.55);
     }
     applyLimbIK(armL,handTargetL,bendVaultL,limbBlend);
     applyLimbIK(armR,handTargetR,bendVaultR,limbBlend);
     guy.updateMatrixWorld(true);
-    vaultHandNormal.copy(vaultHold?climbSurfaceNormal:player.vaultNormal).normalize();
-    vaultHandNormal.lerp(player.vaultLandingNormal,
-      player.vaultLeadLeft?releaseLead:releaseTrail);
-    if(vaultHandNormal.lengthSq()<0.01)vaultHandNormal.copy(player.vaultLandingNormal);
-    vaultHandNormal.normalize();
-    poseHandToSurface(armL,vaultHandNormal,limbBlend);
-    vaultHandNormal.copy(vaultHold?climbSurfaceNormal:player.vaultNormal).normalize();
-    vaultHandNormal.lerp(player.vaultLandingNormal,
-      player.vaultLeadLeft?releaseTrail:releaseLead);
-    if(vaultHandNormal.lengthSq()<0.01)vaultHandNormal.copy(player.vaultLandingNormal);
-    vaultHandNormal.normalize();
-    poseHandToSurface(armR,vaultHandNormal,limbBlend);
+    if(lowVault){
+      const lowRelease=smooth5(Math.max(0,Math.min(1,(vaultK-0.38)/0.25)));
+      vaultHandNormal.copy(player.vaultContactNormal).lerp(UP,lowRelease).normalize();
+      poseHandToSurface(lowVaultPlantLeft?armL:armR,vaultHandNormal,limbBlend);
+      vaultHandNormal.copy(UP).lerp(player.vaultLandingNormal,vaultK).normalize();
+      poseHandToSurface(lowVaultPlantLeft?armR:armL,vaultHandNormal,limbBlend*0.7);
+    }else{
+      vaultHandNormal.copy(vaultHold?climbSurfaceNormal:player.vaultNormal).normalize();
+      vaultHandNormal.lerp(player.vaultLandingNormal,
+        player.vaultLeadLeft?releaseLead:releaseTrail);
+      if(vaultHandNormal.lengthSq()<0.01)vaultHandNormal.copy(player.vaultLandingNormal);
+      vaultHandNormal.normalize();
+      poseHandToSurface(armL,vaultHandNormal,limbBlend);
+      vaultHandNormal.copy(vaultHold?climbSurfaceNormal:player.vaultNormal).normalize();
+      vaultHandNormal.lerp(player.vaultLandingNormal,
+        player.vaultLeadLeft?releaseTrail:releaseLead);
+      if(vaultHandNormal.lengthSq()<0.01)vaultHandNormal.copy(player.vaultLandingNormal);
+      vaultHandNormal.normalize();
+      poseHandToSurface(armR,vaultHandNormal,limbBlend);
+    }
     /* Step one knee over the lip first and let the trailing leg follow. The
        stagger prevents the symmetric tucked-leg pose that made the old vault
        read like a teleport, especially on short ledges. */
-    const leadT=smooth5(Math.max(0,Math.min(1,(vaultK-0.14)/0.66)));
-    const leadLiftPhase=smooth5(Math.max(0,Math.min(1,(vaultK-0.12)/0.64)));
-    const trailLiftPhase=smooth5(Math.max(0,Math.min(1,(vaultK-0.24)/0.6)));
-    const leadLift=Math.sin(Math.PI*leadLiftPhase)*0.13;
-    const trailLift=Math.sin(Math.PI*trailLiftPhase)*0.06;
-    const leadZ=lerp(-0.1,0.3,leadT)+vaultArc*0.2;
-    const trailZ=lerp(-0.16,0.12,leadT)+vaultArc*0.14;
-    const leadY=0.1+vaultArc*0.43+leadLift-vaultLandingLoad*0.06;
-    const trailY=0.1+vaultArc*0.34+trailLift-vaultLandingLoad*0.05;
+    const leadT=lowVault?smooth5(Math.max(0,Math.min(1,(vaultK-0.04)/0.72))):
+      smooth5(Math.max(0,Math.min(1,(vaultK-0.14)/0.66)));
+    const leadLiftPhase=smooth5(Math.max(0,Math.min(1,
+      (vaultK-(lowVault?0.04:0.12))/(lowVault?0.62:0.64))));
+    const trailLiftPhase=smooth5(Math.max(0,Math.min(1,
+      (vaultK-(lowVault?0.16:0.24))/(lowVault?0.62:0.6))));
+    const leadLift=Math.sin(Math.PI*leadLiftPhase)*(lowVault?0.18+vaultHeightBlend*0.07:0.13);
+    const trailLift=Math.sin(Math.PI*trailLiftPhase)*(lowVault?0.1+vaultHeightBlend*0.05:0.06);
+    const leadZ=lowVault?
+      lerp(-0.13,0.48,leadT)+vaultArc*(0.22+vaultSpeedBlend*0.08):
+      lerp(-0.1,0.3,leadT)+vaultArc*0.2;
+    const trailZ=lowVault?
+      lerp(-0.2,0.2,leadT)+vaultArc*(0.12+vaultSpeedBlend*0.05):
+      lerp(-0.16,0.12,leadT)+vaultArc*0.14;
+    const leadY=0.1+vaultArc*(lowVault?0.58+vaultHeightBlend*0.16:0.43)+
+      leadLift-vaultLandingLoad*(lowVault?0.09:0.06);
+    const trailY=0.1+vaultArc*(lowVault?0.43+vaultHeightBlend*0.13:0.34)+
+      trailLift-vaultLandingLoad*(lowVault?0.075:0.05);
+    const leadX=0.14+(lowVault?0.055+vaultSpeedBlend*0.035:0);
+    const trailX=0.14-(lowVault?vaultArc*0.025:0);
     if(player.vaultLeadLeft){
-      footTargetL.set(0.14,leadY,leadZ);
-      footTargetR.set(-0.14,trailY,trailZ);
+      footTargetL.set(leadX,leadY,leadZ);
+      footTargetR.set(-trailX,trailY,trailZ);
     }else{
-      footTargetL.set(0.14,trailY,trailZ);
-      footTargetR.set(-0.14,leadY,leadZ);
+      footTargetL.set(trailX,trailY,trailZ);
+      footTargetR.set(-leadX,leadY,leadZ);
     }
     /* The airborne knee arc is deliberately authored in mantle space, but
        the first recovery frames are already weight-bearing. Re-project both
@@ -1188,7 +1266,8 @@ function updateGuy(dt){
       plantGroundFoot(footTargetR,groundFootWorldR,groundFootNormalR);
       vaultPlantLocalL.copy(footTargetL);
       vaultPlantLocalR.copy(footTargetR);
-      const landingBlend=smooth5(Math.max(0,Math.min(1,vaultLandingElapsed/0.2)));
+      const landingBlend=smooth5(Math.max(0,Math.min(1,
+        vaultLandingElapsed/(lowVault?0.13:0.2))));
       footTargetL.lerpVectors(vaultFootAuthoredL,vaultPlantLocalL,landingBlend);
       footTargetR.lerpVectors(vaultFootAuthoredR,vaultPlantLocalR,landingBlend);
     }
@@ -1277,8 +1356,10 @@ function updateCam(dt){
   camYaw+=angDiff(targetYaw,camYaw)*k;
   camPitch+=(targetPitch-camPitch)*k;
   camRoll+=(camRollTarget-camRoll)*Math.min(1,dt*6);
+  const lowVaultCameraRecovery=player.mode==='ground'&&player.vaultRecovery>0&&
+    player.vaultKind==='low';
   const traversalCamera=player.mode==='attach'||player.mode==='move'||player.mode==='hang'||player.mode==='vault'||
-    (player.mode==='ground'&&player.grace>0&&player.hold>=0);
+    (player.mode==='ground'&&player.grace>0&&player.hold>=0)||lowVaultCameraRecovery;
   /* Bring the chase camera in slightly during traversal. The character is
      doing precise hand/foot work against a surface; keeping the normal combat
      distance made the arms sub-pixel at the exact moment their contact pose
@@ -1294,7 +1375,8 @@ function updateCam(dt){
   camTmp3.y+=0.25;
   camTmp3.z-=Math.sin(camYaw)*0.55;
   const vaultingCamera=player.mode==='vault';
-  const exitingVaultCamera=player.mode==='ground'&&player.grace>0&&player.hold>=0;
+  const exitingVaultCamera=(player.mode==='ground'&&player.grace>0&&player.hold>=0)||
+    lowVaultCameraRecovery;
   const climbingCamera=traversalCamera;
   if(climbingCamera){
     camClimbNormal.set(0,0,0);camClimbSide.set(0,0,0);
