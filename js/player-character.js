@@ -239,10 +239,12 @@ const weaponMuzzlePoints={
   shotgun:[0,0.01,-0.62],
   rpg:[0,0.02,-0.82]
 };
-const IK_DOWN=V(0,-1,0);
 const ikShoulder=V(),ikReach=V(),ikDirection=V(),ikEffectiveTarget=V(),ikBend=V();
 const ikElbow=V(),ikUpperDir=V(),ikLowerDir=V();
+const ikFrameX=V(),ikFrameY=V(),ikFrameZ=V(),ikLocalBend=V();
+const ikDownPole=V(),ikPoleSide=V();
 const ikUpperQ=new THREE.Quaternion(),ikLowerQ=new THREE.Quaternion(),ikInverseQ=new THREE.Quaternion();
+const ikFrameMatrix=new THREE.Matrix4();
 const handPalmNormal=V(),handBasisX=V(),handBasisY=V(),handBasisZ=V();
 const handWorldQ=new THREE.Quaternion(),handParentQ=new THREE.Quaternion(),handLocalQ=new THREE.Quaternion();
 const handBasis=new THREE.Matrix4(),handNeutralQ=new THREE.Quaternion();
@@ -286,11 +288,39 @@ function angDiff(a,b){let d=(a-b)%(Math.PI*2);if(d>Math.PI)d-=Math.PI*2;if(d<-Ma
 function dampValue(a,b,rate,dt){return a+(b-a)*(1-Math.exp(-rate*dt));}
 function dampAngle(a,b,rate,dt){return a+angDiff(b,a)*(1-Math.exp(-rate*dt));}
 
-function applyLimbIK(chain,target,bendDir,blend){
+function setStableLimbQuaternion(direction,pole,out){
+  /* A shortest-arc quaternion is undefined when DOWN and the limb direction
+     are almost opposite. That is exactly the normal overhead climbing pose,
+     so tiny surface changes could flip an arm's twist by 180 degrees. Build a
+     complete frame from the limb direction and its elbow pole instead. */
+  ikFrameY.copy(direction).negate().normalize();
+  ikFrameX.copy(pole).addScaledVector(ikFrameY,-pole.dot(ikFrameY));
+  if(ikFrameX.lengthSq()<0.0001){
+    if(Math.abs(ikFrameY.x)<0.75)ikFrameX.set(1,0,0);
+    else ikFrameX.set(0,0,1);
+    ikFrameX.addScaledVector(ikFrameY,-ikFrameX.dot(ikFrameY));
+  }
+  ikFrameX.normalize();
+  ikFrameZ.crossVectors(ikFrameX,ikFrameY).normalize();
+  ikFrameX.crossVectors(ikFrameY,ikFrameZ).normalize();
+  ikFrameMatrix.makeBasis(ikFrameX,ikFrameY,ikFrameZ);
+  out.setFromRotationMatrix(ikFrameMatrix).normalize();
+  return out;
+}
+
+function applyLimbIK(chain,target,bendDir,blend,keepElbowClear){
+  if(!Number.isFinite(target.x)||!Number.isFinite(target.y)||!Number.isFinite(target.z))return;
+  blend=Math.max(0,Math.min(1,blend));
+  /* Smooth the end-effector, then solve one complete two-bone pose. Slerping
+     the upper arm and forearm independently made each segment represent a
+     different point in time; during a climbing transfer that could fold the
+     forearm behind the head even though both endpoint poses were valid. */
+  if(!chain.ikTarget)chain.ikTarget=target.clone();
+  else chain.ikTarget.lerp(target,blend);
   ikShoulder.copy(chain.root.position);
-  ikReach.copy(target).sub(ikShoulder);
+  ikReach.copy(chain.ikTarget).sub(ikShoulder);
   const rawDistance=ikReach.length();
-  if(rawDistance<0.001)return;
+  if(!Number.isFinite(rawDistance)||rawDistance<0.001)return;
   const distance=Math.max(Math.abs(chain.upperLength-chain.lowerLength)+0.01,
     Math.min(chain.upperLength+chain.lowerLength-0.01,rawDistance));
   ikDirection.copy(ikReach).multiplyScalar(1/rawDistance);
@@ -300,6 +330,7 @@ function applyLimbIK(chain,target,bendDir,blend){
      target stayed in space, leaving a forearm/hand gap that looked like a
      missing arm during a wide weapon aim or a corner climb. */
   target.copy(ikEffectiveTarget);
+  chain.ikTarget.copy(ikEffectiveTarget);
   ikBend.copy(bendDir).addScaledVector(ikDirection,-bendDir.dot(ikDirection));
   if(ikBend.lengthSq()<0.001){
     ikBend.set(1,0,0).addScaledVector(ikDirection,-ikDirection.x);
@@ -308,17 +339,43 @@ function applyLimbIK(chain,target,bendDir,blend){
   ikBend.normalize();
   const cosA=Math.max(-1,Math.min(1,(chain.upperLength*chain.upperLength+distance*distance-chain.lowerLength*chain.lowerLength)/(2*chain.upperLength*distance)));
   const sinA=Math.sqrt(Math.max(0,1-cosA*cosA));
+  if(keepElbowClear&&sinA>0.001){
+    /* Climbing hands can pass close to a shoulder while transferring between
+       neighboring facets. The unconstrained two-bone solution may then pick
+       a valid but humanly absurd elbow-above-the-head branch. Keep the elbow
+       below the hand and below the helmet while preserving its authored
+       left/right flare around the aim axis. */
+    const targetDeltaY=ikEffectiveTarget.y-ikShoulder.y;
+    const baseElbowY=ikDirection.y*cosA*chain.upperLength;
+    const elbowRadius=sinA*chain.upperLength;
+    const maxElbowY=Math.min(0.17,targetDeltaY-0.09);
+    const maxPoleY=(maxElbowY-baseElbowY)/elbowRadius;
+    if(ikBend.y>maxPoleY){
+      ikDownPole.set(0,-1,0).addScaledVector(ikDirection,ikDirection.y);
+      if(ikDownPole.lengthSq()>0.0001){
+        ikDownPole.normalize();
+        ikPoleSide.crossVectors(ikDirection,ikDownPole).normalize();
+        const sideSign=ikBend.dot(ikPoleSide)<0?-1:1;
+        const minimumDown=Math.max(0,Math.min(1,maxPoleY/ikDownPole.y));
+        const downWeight=Math.min(1,Math.max(minimumDown,ikBend.dot(ikDownPole)));
+        ikBend.copy(ikDownPole).multiplyScalar(downWeight)
+          .addScaledVector(ikPoleSide,sideSign*Math.sqrt(Math.max(0,1-downWeight*downWeight)))
+          .normalize();
+      }
+    }
+  }
   ikElbow.copy(ikShoulder)
     .addScaledVector(ikDirection,cosA*chain.upperLength)
     .addScaledVector(ikBend,sinA*chain.upperLength);
   ikUpperDir.copy(ikElbow).sub(ikShoulder).normalize();
-  ikUpperQ.setFromUnitVectors(IK_DOWN,ikUpperDir);
+  setStableLimbQuaternion(ikUpperDir,ikBend,ikUpperQ);
   ikLowerDir.copy(ikEffectiveTarget).sub(ikElbow).normalize();
   ikInverseQ.copy(ikUpperQ).invert();
   ikLowerDir.applyQuaternion(ikInverseQ);
-  ikLowerQ.setFromUnitVectors(IK_DOWN,ikLowerDir);
-  chain.root.quaternion.slerp(ikUpperQ,blend);
-  chain.joint.quaternion.slerp(ikLowerQ,blend);
+  ikLocalBend.copy(ikBend).applyQuaternion(ikInverseQ);
+  setStableLimbQuaternion(ikLowerDir,ikLocalBend,ikLowerQ);
+  chain.root.quaternion.copy(ikUpperQ);
+  chain.joint.quaternion.copy(ikLowerQ);
 }
 
 function poseHandToSurface(chain,normal,blend){
@@ -378,7 +435,9 @@ function poseHandToWeapon(chain,blend,gripFrame){
 function holdWorldPoint(h,side,out){
   /* Keep the palm just outside the wall plane; the elbow pole bends away from it. */
   holdSurfaceAnchor(h,climbSurfacePoint,climbSurfaceNormal);
-  climbSideAxis.crossVectors(UP,climbSurfaceNormal).normalize();
+  climbSideAxis.crossVectors(UP,climbSurfaceNormal);
+  if(climbSideAxis.lengthSq()<0.04)climbSideAxis.set(1,0,0);
+  else climbSideAxis.normalize();
   out.copy(climbSurfacePoint).addScaledVector(UP,0.05)
     .addScaledVector(climbSurfaceNormal,CLIMB_HAND_OFFSET).addScaledVector(climbSideAxis,side);
   return out;
@@ -405,7 +464,9 @@ function lerpHoldWorld(a,b,t,side,out,normalOut){
     .addScaledVector(climbNormalTo,CLIMB_HAND_OFFSET)
     .addScaledVector(climbSideTo,side);
   out.lerpVectors(climbHandPathFrom,climbHandPathTo,t);
-  climbHoldNormal.copy(climbNormalFrom).lerp(climbNormalTo,t).normalize();
+  climbHoldNormal.copy(climbNormalFrom).lerp(climbNormalTo,t);
+  if(climbHoldNormal.lengthSq()<0.001)climbHoldNormal.copy(t<0.5?climbNormalFrom:climbNormalTo);
+  climbHoldNormal.normalize();
   if(normalOut)normalOut.copy(climbHoldNormal);
   return out;
 }
@@ -413,7 +474,9 @@ function lerpHoldWorld(a,b,t,side,out,normalOut){
 function pickDownFootHold(h,side){
   if(!h||!h.down||!h.down.length)return -1;
   holdSurfaceAnchor(h,climbSurfacePoint,climbSurfaceNormal);
-  climbSideAxis.crossVectors(UP,climbSurfaceNormal).normalize();
+  climbSideAxis.crossVectors(UP,climbSurfaceNormal);
+  if(climbSideAxis.lengthSq()<0.04)climbSideAxis.set(1,0,0);
+  else climbSideAxis.normalize();
   let best=-1,bestScore=-1e9;
   for(const j of h.down){
     const candidate=HOLDS[j];
@@ -438,7 +501,9 @@ function climbFootPoint(h,side,out,normalOut){
   const footHold=pickDownFootHold(h,side);
   const anchor=footHold>=0?HOLDS[footHold]:h;
   holdSurfaceAnchor(anchor,climbSurfacePoint,climbSurfaceNormal);
-  climbSideAxis.crossVectors(UP,climbSurfaceNormal).normalize();
+  climbSideAxis.crossVectors(UP,climbSurfaceNormal);
+  if(climbSideAxis.lengthSq()<0.04)climbSideAxis.set(1,0,0);
+  else climbSideAxis.normalize();
   out.copy(climbSurfacePoint).addScaledVector(climbSurfaceNormal,CLIMB_FOOT_OFFSET).addScaledVector(climbSideAxis,side);
   if(normalOut)normalOut.copy(climbSurfaceNormal);
   if(footHold<0){
@@ -680,7 +745,9 @@ function updateGuy(dt){
         climbTransfer=s;
         holdSurfaceAnchor(fromHold,climbSurfacePoint,climbNormalFrom);
         holdSurfaceAnchor(toHold,climbSurfacePointB,climbNormalTo);
-        wallNormal.copy(climbNormalFrom).lerp(climbNormalTo,s).normalize();
+        wallNormal.copy(climbNormalFrom).lerp(climbNormalTo,s);
+        if(wallNormal.lengthSq()<0.001)wallNormal.copy(s<0.5?climbNormalFrom:climbNormalTo);
+        wallNormal.normalize();
         contactHold=s<0.5?fromHold:toHold;
       }
     }else{
@@ -1004,8 +1071,8 @@ function updateGuy(dt){
     }
     toTiltLocal(climbHandWorldL,handTargetL);
     toTiltLocal(climbHandWorldR,handTargetR);
-    applyLimbIK(armL,handTargetL,bendClimbL,limbBlend);
-    applyLimbIK(armR,handTargetR,bendClimbR,limbBlend);
+    applyLimbIK(armL,handTargetL,bendClimbL,limbBlend,true);
+    applyLimbIK(armR,handTargetR,bendClimbR,limbBlend,true);
     guy.updateMatrixWorld(true);
     poseHandToSurface(armL,climbHandNormalL,limbBlend);
     poseHandToSurface(armR,climbHandNormalR,limbBlend);
