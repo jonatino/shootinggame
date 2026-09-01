@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PROXY CLIMB — RPG DESTRUCTION</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:ui-monospace,Menlo,Consolas,monospace}
+  canvas{display:block}
+  #ctl{position:fixed;top:12px;left:12px;color:#e8e4da;background:rgba(10,12,14,.72);padding:10px 13px;border-radius:8px;font-size:12px;line-height:1.65;pointer-events:none;z-index:5;max-width:340px}
+  #ctl b{color:#ffd479}
+  #stats{position:fixed;top:12px;right:12px;color:#e8e4da;background:rgba(10,12,14,.72);padding:10px 13px;border-radius:8px;font-size:12px;line-height:1.65;pointer-events:none;z-index:5;min-width:240px;text-align:right}
+  #stats b{color:#ffd479}
+  #bar{height:6px;background:#333;border-radius:3px;margin-top:3px;overflow:hidden}
+  #hpfill{height:100%;background:#5ed068;width:100%;transition:width .15s}
+  #cross{position:fixed;top:50%;left:50%;width:18px;height:18px;margin:-9px 0 0 -9px;pointer-events:none;z-index:6}
+  #cross::before,#cross::after{content:'';position:absolute;background:rgba(255,210,140,.85);box-shadow:0 0 3px #000}
+  #cross::before{left:50%;top:0;width:2px;height:100%;margin-left:-1px}
+  #cross::after{top:50%;left:0;height:2px;width:100%;margin-top:-1px}
+  #cross.recoil{animation:crossRecoil 0.14s ease-out}
+  @keyframes crossRecoil{0%{transform:scale(1.6)}100%{transform:scale(1)}}
+  #lowhp{position:fixed;inset:0;pointer-events:none;z-index:7;opacity:0;transition:opacity .5s;background:radial-gradient(ellipse at center,transparent 55%,rgba(180,20,20,.55) 100%)}
+  #lowhp.pulse{animation:lphp 0.9s ease-in-out infinite}
+  @keyframes lphp{0%,100%{opacity:.55}50%{opacity:.95}}
+  #hit{position:fixed;inset:0;pointer-events:none;z-index:7;background:radial-gradient(circle,transparent 60%,rgba(255,40,40,.5) 100%);opacity:0;transition:opacity .25s}
+  #marker{position:fixed;top:50%;left:50%;width:26px;height:26px;margin:-13px 0 0 -13px;pointer-events:none;z-index:6;opacity:0}
+  #marker::before,#marker::after{content:'';position:absolute;background:rgba(255,70,60,.95);box-shadow:0 0 3px #000}
+  #marker::before{left:50%;top:0;width:3px;height:100%;margin-left:-1.5px;transform:rotate(45deg)}
+  #marker::after{left:50%;top:0;width:3px;height:100%;margin-left:-1.5px;transform:rotate(-45deg)}
+  #marker.show{opacity:1;animation:mark 0.18s ease-out}
+  @keyframes mark{0%{transform:scale(1.4)}100%{transform:scale(0.8)}}
+  #hint{position:fixed;bottom:64px;width:100%;text-align:center;color:#fff;font-size:15px;letter-spacing:1px;text-shadow:0 1px 3px #000;pointer-events:none;z-index:5}
+  #hint.bad{color:#ff6b5e}
+  #kill{position:fixed;bottom:14px;right:14px;color:#ffd479;background:rgba(10,12,14,.7);padding:6px 10px;border-radius:6px;font-size:12px;pointer-events:none;z-index:5}
+  #load{position:fixed;inset:0;background:#0c0e10;color:#cfe8ff;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:20;font-size:14px;letter-spacing:1px}
+  #load .big{font-size:22px;margin-bottom:14px;color:#fff}
+  #start{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(5,6,8,.45);color:#fff;font-size:18px;letter-spacing:2px;z-index:15;cursor:pointer}
+  #err{position:fixed;top:0;left:0;right:0;background:#7a1020;color:#fff;padding:8px 14px;font-size:13px;display:none;z-index:50}
+</style>
+</head>
+<body>
+<div id="err"></div>
+<div id="ctl">
+  <b>WASD</b> move &nbsp;<b>SHIFT+W</b> auto-climb wall &nbsp;<b>S</b> let go &nbsp;<b>SPACE</b> jump / vault at a ledge<br>
+  <b>mouse</b> look &nbsp;<b>LMB</b> shoot (∞ ammo) &nbsp;<b>1/2/3/4</b> pistol/rifle/shotgun/RPG &nbsp;<b>M</b> audio<br>
+  goal: blow everything up
+</div>
+<div id="stats">
+  <b id="wpn">RPG</b> &nbsp; <span id="ammo">∞ / ∞</span><br>
+  <span id="hp">HP 100</span>
+  <div id="bar"><div id="hpfill"></div></div>
+  <span id="audio">AUDIO OFF</span><br>
+  <span id="prof" style="display:none"></span>
+</div>
+<div id="cross"></div>
+<div id="marker"></div>
+<div id="hit"></div>
+<div id="lowhp"></div>
+<div id="hint"></div>
+<div id="kill">KILLS 0 · DEBRIS 0</div>
+<div id="load"><div class="big">PROXY CLIMB — RPG DESTRUCTION</div><div id="loadmsg">fracturing geometry…</div></div>
+<div id="start">CLICK TO PLAY</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="./voxel_physics.js?v=4"></script>
+<script src="./js/core.js?v=4"></script>
+<script src="./js/destruction.js?v=4"></script>
+<script src="./js/world.js?v=5"></script>
+<script src="./js/combat.js?v=4"></script>
+<script src="./js/climbing.js?v=4"></script>
+<script src="./js/player-controller.js?v=4"></script>
+<script src="./js/player-character.js?v=4"></script>
+<script src="./js/ui-effects.js?v=4"></script>
+<script src="./js/rigid-body.js?v=4"></script>
+<script src="./js/actors.js?v=4"></script>
+<script src="./js/game-loop.js?v=5"></script>
+</body>
+</html>
