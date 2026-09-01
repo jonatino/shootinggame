@@ -253,7 +253,7 @@ const bendVaultL=V(1,-0.08,-0.55),bendVaultR=V(-1,-0.08,-0.55);
 const bendGroundL=V(1,-0.32,-0.72),bendGroundR=V(-1,-0.32,-0.72);
 const bendFootClimbL=V(0.12,0,-1),bendFootClimbR=V(-0.12,0,-1);
 const bendFootVaultL=V(0.12,0,1),bendFootVaultR=V(-0.12,0,1);
-const bendFootGround=V(0,0,1);
+const bendFootGroundL=V(0.12,0,1),bendFootGroundR=V(-0.12,0,1);
 const aimWorld=V(),bodyForward=V(),bodyRight=V();
 const handWorldL=V(),handWorldR=V(),handTargetL=V(),handTargetR=V();
 const climbHandWorldL=V(),climbHandWorldR=V();
@@ -264,9 +264,6 @@ const climbHandPathFrom=V(),climbHandPathTo=V(),climbSideFrom=V(),climbSideTo=V(
 const vaultHandWorldL=V(),vaultHandWorldR=V(),vaultBraceL=V(),vaultBraceR=V();
 const vaultHandNormal=V();
 const groundFootWorldL=V(),groundFootWorldR=V();
-const groundPlantWorldL=V(),groundPlantWorldR=V();
-const groundPlantNormalL=V(0,1,0),groundPlantNormalR=V(0,1,0);
-let groundFootPlantedL=false,groundFootPlantedR=false;
 const climbHoldNormal=V(),climbSideAxis=V();
 const footTargetL=V(),footTargetR=V();
 const wallNormal=V();
@@ -566,7 +563,7 @@ function toTiltLocal(world,out){
   return out;
 }
 
-function plantGroundFoot(localTarget,worldOut,normalOut){
+function plantGroundFoot(localTarget,worldOut,normalOut,clearance=0){
   normalOut.copy(UP);
   worldOut.copy(localTarget);
   tilt.localToWorld(worldOut);
@@ -582,41 +579,35 @@ function plantGroundFoot(localTarget,worldOut,normalOut){
        Put that endpoint above the contact plane so the visible boot, not the
        hidden leg chain, is what actually plants on the ground. */
     worldOut.y=hit.point.y+0.16;
+    /* A swinging boot still needs the surface normal, but it must not be
+       snapped onto that surface. The old projection discarded the authored
+       lift on every frame, so both feet visibly skimmed the floor. Raise the
+       ankle along the sampled normal after establishing its contact height. */
+    if(clearance>0)worldOut.addScaledVector(normalOut,clearance);
     toTiltLocal(worldOut,localTarget);
     return true;
   }
   return false;
 }
 
-function updatePlantedGroundFoot(phase,side,stride,lift,bodyBounce,stepSign,worldAnchor,normalAnchor,target,worldOut,normalOut,wasPlanted){
-  const swingWindow=0.43;
-  /* Alternate the forward/backward stride each full gait cycle. The previous
-     pose always started a swing at -stride, so a planted foot at +stride
-     teleported across the ankle when `phase` wrapped to zero. Matching the
-     next swing's start to the previous plant keeps the foot path continuous. */
-  const startZ=-stride*stepSign,endZ=stride*stepSign;
+function updateGroundGaitFoot(phase,side,stride,lift,bodyBounce,swingWindow,target,worldOut,normalOut){
+  let z=0,clearance=0;
   if(phase<swingWindow){
     const t=phase/swingWindow;
-    target.set(
-      side*0.13,
-      0.1-bodyBounce+Math.sin(Math.PI*t)*lift,
-      lerp(startZ,endZ,smooth5(t))
-    );
-    plantGroundFoot(target,worldOut,normalOut);
-    return false;
+    z=lerp(-stride,stride,smooth5(t));
+    clearance=Math.sin(Math.PI*t)*lift;
+  }else{
+    /* At arcade movement speeds a literal world-space foot lock exceeds the
+       complete leg reach in only a few frames. Let the stance boot travel
+       backward under the body for the visual plant, while keeping the target
+       bounded to a human-sized stride. This preserves the contact read
+       without stretching both legs into immobile rods. */
+    const t=(phase-swingWindow)/(1-swingWindow);
+    z=lerp(stride,-stride,t);
   }
-  if(!wasPlanted){
-    /* Capture the foot at the end of the swing. It remains fixed in world
-       space while the pelvis travels over it, eliminating planted-foot slide. */
-    target.set(side*0.13,0.1-bodyBounce,endZ);
-    plantGroundFoot(target,worldOut,normalOut);
-    worldAnchor.copy(worldOut);
-    normalAnchor.copy(normalOut);
-    return true;
-  }
-  toTiltLocal(worldAnchor,target);
-  normalOut.copy(normalAnchor);
-  return true;
+  target.set(side*(0.13+clearance*0.06),0.1-bodyBounce+clearance,z);
+  plantGroundFoot(target,worldOut,normalOut,clearance);
+  return clearance;
 }
 
 function alignFootSurface(chain,normalWorld,blend){
@@ -656,6 +647,25 @@ function updateGuy(dt){
   const vaultLandingLoad=vaultRecover?Math.exp(-vaultLandingElapsed*11):0;
   const walking=mode==='ground'&&player.onGround&&walkAmt>0.01;
   const inAir=mode==='ground'&&!player.onGround;
+  weaponSprint=dampValue(weaponSprint,sprinting?1:0,10,dt);
+  /* World movement is intentionally arcade-fast, so driving the legs from
+     literal distance travelled would demand an impossible twenty-plus steps
+     per second. Keep a readable human cadence, then distinguish sprinting
+     through stride, lift, and body load rather than merely speeding up a tiny
+     walk cycle. */
+  const groundSpeedBlend=walking?Math.min(1,walkAmt/PLAYER_WALK_SPEED):0;
+  const runGait=walking?weaponSprint:0;
+  if(walking){
+    const cadence=lerp(9.8,13.2,groundSpeedBlend)+runGait*4.8;
+    walkPhase=(walkPhase+dt*cadence)%(Math.PI*2);
+  }
+  const gait=Math.sin(walkPhase);
+  const gaitCos=Math.cos(walkPhase);
+  const stepPulse=Math.cos(walkPhase*2);
+  const gaitRoll=walking?gait*(0.055+runGait*0.035):0;
+  const gaitYaw=walking?gait*(0.075+runGait*0.055):0;
+  const gaitPitch=walking?gaitCos*(0.018+runGait*0.018):0;
+  const bodyBounce=walking?stepPulse*(0.042+runGait*0.026):0;
   /* Drive the weight shift from the same progress value that moves the root
      and hand targets. A free-running oscillator could put the hips on the
      wrong side of the transfer when a long corner link took more time. */
@@ -685,6 +695,8 @@ function updateGuy(dt){
      arms detach from the vest. */
   const shoulderLoadL=climbing?climbLiftL*0.035:(vaulting?(player.vaultLeadLeft?0.045:0.018):0);
   const shoulderLoadR=climbing?climbLiftR*0.035:(vaulting?(player.vaultLeadLeft?0.018:0.045):0);
+  const groundShoulderLift=walking?gait*(0.022+runGait*0.026):0;
+  const groundShoulderTravel=walking?gaitCos*(0.018+runGait*0.03):0;
   /* A mantle owns both hands until its landing recovery is finished. Treating
      that frame as a weapon-ready pose let the shoulder rig fight the vault
      brace and was a common source of a one-frame arm pop. */
@@ -700,8 +712,8 @@ function updateGuy(dt){
      arm into the chest. Move only that shoulder inward/forward for a believable
      cross-body support pose; the trigger shoulder remains planted. */
   const supportShoulderX=twoHandedWeapon?0.28:0.4;
-  armL.sh.position.y=dampValue(armL.sh.position.y,1.51+shoulderLoadL+weaponShoulderLift,18,dt);
-  armR.sh.position.y=dampValue(armR.sh.position.y,1.51+shoulderLoadR+weaponShoulderLift,18,dt);
+  armL.sh.position.y=dampValue(armL.sh.position.y,1.51+shoulderLoadL+weaponShoulderLift+groundShoulderLift,18,dt);
+  armR.sh.position.y=dampValue(armR.sh.position.y,1.51+shoulderLoadR+weaponShoulderLift-groundShoulderLift,18,dt);
   armL.sh.position.x=dampValue(armL.sh.position.x,supportShoulderX,18,dt);
   armR.sh.position.x=dampValue(armR.sh.position.x,-0.4,18,dt);
   /* Keep the shoulder joints just inside the vest's safe exterior plane while
@@ -712,9 +724,8 @@ function updateGuy(dt){
   const climbShoulderReach=climbing?0.08:0;
   const weaponShoulderReach=weaponReady*0.035;
   const supportShoulderDepth=twoHandedWeapon?0.24:0;
-  armL.sh.position.z=dampValue(armL.sh.position.z,-0.24+shoulderLoadL*0.7+climbShoulderReach+weaponShoulderReach+supportShoulderDepth-recoilLoad*0.03,18,dt);
-  armR.sh.position.z=dampValue(armR.sh.position.z,-0.24+shoulderLoadR*0.7+climbShoulderReach+weaponShoulderReach-recoilLoad*0.03,18,dt);
-  weaponSprint=dampValue(weaponSprint,sprinting?1:0,10,dt);
+  armL.sh.position.z=dampValue(armL.sh.position.z,-0.24+shoulderLoadL*0.7+climbShoulderReach+weaponShoulderReach+supportShoulderDepth-recoilLoad*0.03-groundShoulderTravel,18,dt);
+  armR.sh.position.z=dampValue(armR.sh.position.z,-0.24+shoulderLoadR*0.7+climbShoulderReach+weaponShoulderReach-recoilLoad*0.03+groundShoulderTravel,18,dt);
   /* Move the elbow poles with the loaded side of the climb. A fixed pole makes
      both arms solve into the same straight mannequin pose even when one hand is
      reaching and the other is carrying the body. */
@@ -767,7 +778,6 @@ function updateGuy(dt){
   }
   heading=dampAngle(heading,targetHeading,14,dt);
   guy.rotation.y=heading;
-  if(walking)walkPhase+=dt*Math.min(38,11+walkAmt*1.05);
 
   camera.getWorldDirection(aimWorld);
   aimWorld.normalize();
@@ -785,8 +795,6 @@ function updateGuy(dt){
   const aimYaw=Math.atan2(aimX,Math.max(0.001,aimZ));
   const aimPitch=Math.atan2(-aimY,Math.max(0.001,Math.hypot(aimX,aimZ)));
 
-  const gait=Math.sin(walkPhase);
-  const bodyBounce=walking?Math.sin(walkPhase*2)*(sprinting?0.045:0.028):0;
   guy.position.copy(player.pos);
   guy.position.y+=PLAYER_BODY_LIFT;
   if(climbing&&contactHold){
@@ -879,32 +887,36 @@ function updateGuy(dt){
     (vaulting?vaultArc*0.03-vaultLandingLoad*0.06:bodyBounce*0.45-landingKick*0.055);
   pelvis.position.y=dampValue(pelvis.position.y,0.92+pelvisBob,14,dt);
   pelvis.rotation.x=dampValue(pelvis.rotation.x,
-    climbing?0.04-climbLoad*0.08:(vaulting?0.025:-recoilLoad*0.018),10,dt);
+    climbing?0.04-climbLoad*0.08:(vaulting?0.025:gaitPitch-recoilLoad*0.018),10,dt);
   pelvis.rotation.y=dampAngle(pelvis.rotation.y,
-    climbing?(0.08-0.16*climbTransfer)*climbLoad:0,10,dt);
+    climbing?(0.08-0.16*climbTransfer)*climbLoad:-gaitYaw,10,dt);
   pelvis.rotation.z=dampValue(pelvis.rotation.z,climbing?climbCycle*0.07+climbHangSway*0.02:
-    (walking?-gait*0.035+groundSideLean:Math.sin(now*1.5)*0.012)+recoilRoll*0.16,10,dt);
+    (walking?-gaitRoll+groundSideLean:Math.sin(now*1.5)*0.012)+recoilRoll*0.16,10,dt);
   torso.position.y=dampValue(torso.position.y,1.18+bodyBounce*0.35-landingKick*0.04-
     vaultLandingLoad*0.045-climbCompression*0.035-recoilLoad*0.018,14,dt);
   torso.rotation.x=dampValue(torso.rotation.x,climbing?-0.07:
     (vaulting?-0.12-vaultLandingLoad*0.08:
-      (inAir?0.06:-landingKick*0.14-recoilLoad*0.07)+weaponReady*aimPitch*0.08),10,dt);
+      (inAir?0.06:-gaitPitch*0.55-landingKick*0.14-recoilLoad*0.07)+weaponReady*aimPitch*0.08),10,dt);
   torso.rotation.y=dampAngle(torso.rotation.y,
       climbing?aimYaw*0.12+climbCycle*0.1-climbLoad*0.12:
-        aimYaw*0.16-accelSide*0.08,9,dt);
+        aimYaw*0.16-accelSide*0.08+gaitYaw*0.82,9,dt);
   torso.rotation.z=dampValue(torso.rotation.z,
     climbing?climbCycle*0.03-climbLoad*0.11:
-      (walking?gait*0.035+groundSideLean*0.55:groundSideLean*0.35)+recoilRoll*0.55,9,dt);
+      (walking?gaitRoll*0.82+groundSideLean*0.55:groundSideLean*0.35)+recoilRoll*0.55,9,dt);
   head.position.y=dampValue(head.position.y,1.78+bodyBounce*0.18-landingKick*0.03-
     climbCompression*0.016-recoilLoad*0.012,14,dt);
   head.rotation.y=dampAngle(head.rotation.y,Math.max(-0.75,Math.min(0.75,aimYaw*(climbing?0.7:0.45))),11,dt);
   head.rotation.x=dampValue(head.rotation.x,Math.max(-0.45,Math.min(0.55,
     aimPitch*0.42+(climbing?-0.08:0)-recoilPitch*0.3-recoilLoad*0.02)),11,dt);
   head.rotation.z=dampValue(head.rotation.z,
-    (walking?-gait*0.02:Math.sin(now*1.1)*0.01)+recoilRoll*0.35,10,dt);
+    (walking?-gaitRoll*0.38:Math.sin(now*1.1)*0.01)+recoilRoll*0.35,10,dt);
   const hipY=0.92-landingKick*0.055-climbCompression*0.025;
-  legL.hip.position.y=dampValue(legL.hip.position.y,hipY,14,dt);
-  legR.hip.position.y=dampValue(legR.hip.position.y,hipY,14,dt);
+  const hipLift=walking?gaitCos*(0.008+runGait*0.006):0;
+  const hipTravel=walking?gait*(0.025+runGait*0.025):0;
+  legL.hip.position.y=dampValue(legL.hip.position.y,hipY+hipLift,14,dt);
+  legR.hip.position.y=dampValue(legR.hip.position.y,hipY-hipLift,14,dt);
+  legL.hip.position.z=dampValue(legL.hip.position.z,hipTravel,18,dt);
+  legR.hip.position.z=dampValue(legR.hip.position.z,-hipTravel,18,dt);
 
   const profile=weaponHoldProfiles[playerWpn.cur]||weaponHoldProfiles.rpg;
   const weapon=wpnStats();
@@ -936,9 +948,14 @@ function updateGuy(dt){
     gunGroup.scale.setScalar(dampValue(gunGroup.scale.x,stowScale,14,dt));
   }else{
     gunGroup.visible=true;
-    const sway=walking?(sprinting?1:0.5):0.14;
-    const swayX=Math.cos(walkPhase*1.5)*0.012*sway;
-    const swayY=Math.sin(walkPhase*2)*0.018*sway;
+    /* Both weapon hands sample this same transform below. A stronger shared
+       gait therefore articulates shoulders and elbows while the palms remain
+       physically attached to their grips. */
+    const swayX=walking?gait*(0.018+runGait*0.024):Math.cos(now*0.8)*0.0025;
+    const swayY=walking?-stepPulse*(0.02+runGait*0.026):Math.sin(now*1.2)*0.003;
+    const swayZ=walking?gaitCos*(0.012+runGait*0.026):0;
+    const swayPitch=walking?stepPulse*(0.012+runGait*0.022):0;
+    const swayRoll=walking?gait*(0.034+runGait*0.038):0;
     /* The cooldown kick is the fast muzzle impulse. The independent recoil
        state supplies the slower stock push that the hands and shoulders track. */
     const recoilZ=-kickRatio*0.07-recoilLoad*0.045;
@@ -955,15 +972,15 @@ function updateGuy(dt){
     gunGroup.position.x=dampValue(gunGroup.position.x,profile.mount[0]+swayX+sprintX+movementWeaponSway,16,dt);
     gunGroup.position.y=dampValue(gunGroup.position.y,profile.mount[1]+swayY+sprintY-movementWeaponDip+
       Math.abs(camPitchKick)*0.025+landingKick*0.025+recoilLoad*0.014,16,dt);
-    gunGroup.position.z=dampValue(gunGroup.position.z,profile.mount[2]+recoilZ+sprintZ-movementWeaponPush,16,dt);
+    gunGroup.position.z=dampValue(gunGroup.position.z,profile.mount[2]+recoilZ+sprintZ+swayZ-movementWeaponPush,16,dt);
     const weaponAimYaw=Math.max(-1.35,Math.min(1.35,aimYaw));
     /* Local weapon forward is -Z, so its pitch sign is opposite the camera aim angle. */
     const weaponAimPitch=-aimPitch+kickRatio*(playerWpn.cur==='rpg'?0.08:0.045)+
-      weaponSprint*0.24+recoilPitch*0.72;
+      weaponSprint*0.24+recoilPitch*0.72+swayPitch;
     /* Weapon meshes point along local -Z; rotate 180° onto the character's +Z forward axis. */
     gunGroup.rotation.y=dampAngle(gunGroup.rotation.y,weaponAimYaw+Math.PI,18,dt);
     gunGroup.rotation.x=dampValue(gunGroup.rotation.x,weaponAimPitch,18,dt);
-    gunGroup.rotation.z=dampValue(gunGroup.rotation.z,(walking?Math.sin(walkPhase*1.5)*0.025*sway:0)-weaponSprint*0.12-
+    gunGroup.rotation.z=dampValue(gunGroup.rotation.z,swayRoll-weaponSprint*0.12-
       sideLoad*0.035+turnLoad*0.04+camYawKick*0.5+recoilRoll*0.8,16,dt);
     gunGroup.scale.setScalar(dampValue(gunGroup.scale.x,1,16,dt));
   }
@@ -1189,12 +1206,12 @@ function updateGuy(dt){
     }else{
       /* The pistol's free hand counter-swings with the gait instead of staying
          locked to the torso; supported weapons keep both hands on the grip. */
-      const freePhase=walkPhase+Math.PI*0.5;
-      const freeSwing=walking?Math.sin(freePhase):0;
+      const freeSwing=walking?gait:0;
+      const freeArmTravel=0.16+runGait*0.12;
       handTargetL.set(
-        profile.offHand[0]+freeSwing*0.07,
-        profile.offHand[1]+(walking?Math.max(0,freeSwing)*0.035:0),
-        profile.offHand[2]+freeSwing*0.045
+        profile.offHand[0]-freeSwing*(0.018+runGait*0.014),
+        profile.offHand[1]+(walking?Math.max(0,-freeSwing)*(0.05+runGait*0.045):0),
+        profile.offHand[2]-freeSwing*freeArmTravel
       );
     }
     /* The support arm opens toward the foregrip while the trigger arm stays
@@ -1216,25 +1233,23 @@ function updateGuy(dt){
     poseHandToWeapon(armR,limbBlend,profile.primaryGrip);
     if(profile.support)poseHandToWeapon(armL,limbBlend,profile.supportGrip);
     else relaxHand(armL,limbBlend);
-    const stride=sprinting?0.58:0.43;
-    const lift=sprinting?0.19:0.14;
+    const stride=lerp(0.46,0.62,runGait);
+    const lift=lerp(0.19,0.32,runGait);
+    const swingWindow=lerp(0.43,0.47,runGait);
     const airLift=inAir?Math.min(0.38,0.1+Math.abs(player.vel.y)*0.035):0;
     if(walking){
       const cycle=fract(walkPhase/(Math.PI*2));
       const leftPhase=cycle,rightPhase=fract(cycle+0.5);
-      const gaitCycle=walkPhase/(Math.PI*2);
-      const leftStepSign=(Math.floor(gaitCycle)&1)===0?1:-1;
-      const rightStepSign=(Math.floor(gaitCycle+0.5)&1)===0?1:-1;
-      groundFootPlantedL=updatePlantedGroundFoot(
-        leftPhase,1,stride,lift,bodyBounce,leftStepSign,
-        groundPlantWorldL,groundPlantNormalL,footTargetL,groundFootWorldL,groundFootNormalL,groundFootPlantedL
-      );
-      groundFootPlantedR=updatePlantedGroundFoot(
-        rightPhase,-1,stride,lift,bodyBounce,rightStepSign,
-        groundPlantWorldR,groundPlantNormalR,footTargetR,groundFootWorldR,groundFootNormalR,groundFootPlantedR
-      );
+      const leftLift=updateGroundGaitFoot(leftPhase,1,stride,lift,bodyBounce,
+        swingWindow,footTargetL,groundFootWorldL,groundFootNormalL);
+      const rightLift=updateGroundGaitFoot(rightPhase,-1,stride,lift,bodyBounce,
+        swingWindow,footTargetR,groundFootWorldR,groundFootNormalR);
+      /* Separate knee poles let the airborne knee drive forward while the
+         stance knee remains loaded. A shared pole left both legs rotating as
+         one rigid pair even when their ankle targets differed. */
+      bendFootGroundL.set(0.12+leftLift*0.2,-0.04,1+leftLift*0.9);
+      bendFootGroundR.set(-0.12-rightLift*0.2,-0.04,1+rightLift*0.9);
     }else{
-      groundFootPlantedL=false;groundFootPlantedR=false;
       footTargetL.set(0.13,0.1-bodyBounce+airLift,0);
       footTargetR.set(-0.13,0.1-bodyBounce+airLift,0);
       if(player.onGround){
@@ -1243,11 +1258,14 @@ function updateGuy(dt){
       }else{
         groundFootNormalL.copy(UP);groundFootNormalR.copy(UP);
       }
+      bendFootGroundL.set(0.12,-0.04,1);
+      bendFootGroundR.set(-0.12,-0.04,1);
     }
-    applyLimbIK(legL,footTargetL,bendFootGround,limbBlend);
-    applyLimbIK(legR,footTargetR,bendFootGround,limbBlend);
-    alignFootSurface(legL,groundFootNormalL,limbBlend*0.8);
-    alignFootSurface(legR,groundFootNormalR,limbBlend*0.8);
+    const gaitLimbBlend=walking?1-Math.exp(-26*dt):limbBlend;
+    applyLimbIK(legL,footTargetL,bendFootGroundL,gaitLimbBlend);
+    applyLimbIK(legR,footTargetR,bendFootGroundR,gaitLimbBlend);
+    alignFootSurface(legL,groundFootNormalL,gaitLimbBlend*0.8);
+    alignFootSurface(legR,groundFootNormalR,gaitLimbBlend*0.8);
   }
   const handState=climbing?'climb':(vaulting?'vault':'weapon');
   updateHandDetail(armL,profile.support?handState:(climbing||vaulting?handState:'relaxed'),dt);
