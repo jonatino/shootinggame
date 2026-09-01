@@ -43,6 +43,7 @@ let weaponSprint=0,movementAccel=0;
 let started=false;
 let mouseHeld=false;
 let mouseLookReady=false,lastMouseX=0,lastMouseY=0;
+const MOUSE_SENSITIVITY=0.0026;
 let fireBlockUntil=0;
 const climbIntentDir=V();
 let climbIntentUntil=0;
@@ -147,6 +148,20 @@ addEventListener('blur',()=>{
   movementIntentUntil=0;movementIntentDir.set(0,0,0);
   for(const code in keys)keys[code]=false;
 });
+function applyMouseLookDelta(dx,dy){
+  /* Apply physical mouse travel directly to both the live camera and its
+     scripted target. Updating only the target made updateCam ease toward the
+     input for several frames, which felt like acceleration on fast turns and
+     kept drifting after the mouse stopped. Scripted mantle camera moves can
+     still use targetYaw and retain their deliberate easing. */
+  const yawDelta=-dx*MOUSE_SENSITIVITY;
+  targetYaw+=yawDelta;
+  camYaw+=yawDelta;
+  const nextPitch=Math.max(-0.1,Math.min(1.25,targetPitch+dy*MOUSE_SENSITIVITY));
+  const pitchDelta=nextPitch-targetPitch;
+  targetPitch=nextPitch;
+  camPitch=Math.max(-0.1,Math.min(1.25,camPitch+pitchDelta));
+}
 addEventListener('mousemove',e=>{
   if(!started)return;
   let dx=0,dy=0;
@@ -159,18 +174,30 @@ addEventListener('mousemove',e=>{
     dx=e.clientX-lastMouseX;dy=e.clientY-lastMouseY;
     lastMouseX=e.clientX;lastMouseY=e.clientY;
   }
-  targetYaw-=dx*0.0026;
-  targetPitch=Math.max(-0.1,Math.min(1.25,targetPitch+dy*0.0026));
+  applyMouseLookDelta(dx,dy);
 });
+function requestAdjustedPointerLockFallback(){
+  if(document.pointerLockElement===renderer.domElement)return;
+  try{
+    const fallback=renderer.domElement.requestPointerLock();
+    if(fallback&&typeof fallback.catch==='function')fallback.catch(()=>{});
+  }catch(_){
+    /* Pointer lock is optional; ordinary cursor deltas remain linear. */
+  }
+}
 function requestGamePointerLock(){
   if(document.pointerLockElement===renderer.domElement)return;
   try{
-    const request=renderer.domElement.requestPointerLock();
-    if(request&&typeof request.catch==='function')request.catch(()=>{});
+    /* Raw pointer lock explicitly bypasses operating-system mouse
+       acceleration where the browser supports unadjustedMovement. */
+    const request=renderer.domElement.requestPointerLock({unadjustedMovement:true});
+    if(request&&typeof request.catch==='function')
+      request.catch(requestAdjustedPointerLockFallback);
   }catch(_){
-    /* Pointer lock is optional; some embedded browsers reject the request. */
+    requestAdjustedPointerLockFallback();
   }
 }
+addEventListener('pointerlockchange',()=>{mouseLookReady=false;});
 renderer.domElement.addEventListener('click',requestGamePointerLock);
 document.getElementById('start').addEventListener('mousedown',e=>e.stopPropagation());
 document.getElementById('start').addEventListener('click',()=>{
