@@ -109,8 +109,12 @@ function updateRockets(dt){
   for(let i=rockets.length-1;i>=0;i--){
     const r=rockets[i];
     rocketPrev.copy(r.pos);
-    r.vel.y-=9.8*dt;
     r.pos.addScaledVector(r.vel,dt);
+    /* Integrate the same constant-gravity trajectory used by the launch
+       solver. The previous semi-implicit step added one extra frame of drop,
+       so even a mathematically corrected shot landed below the reticle. */
+    r.pos.y-=0.5*ROCKET_GRAVITY*dt*dt;
+    r.vel.y-=ROCKET_GRAVITY*dt;
     r.life-=dt;
     r.mesh.position.copy(r.pos);
     r.dir.copy(r.vel).normalize();
@@ -141,9 +145,9 @@ function updateRockets(dt){
     if(travel>0.001){
       rocketAxis.copy(rocketTravel).multiplyScalar(1/travel);
       rc.set(rocketPrev,rocketAxis);rc.far=travel+0.2;rc.near=0.001;
-      /* Projectiles collide with every solid visual, including roofs, trim, and
-         already-fallen chunks—not only surfaces that happen to be climbable. */
-      const hits=rc.intersectObjects(occluders,false);
+      /* Projectiles collide with every solid visual and voxel actor that the
+         reticle can resolve, including roofs, trim, and already-fallen chunks. */
+      const hits=rc.intersectObjects(collectShotTargets(),false);
       if(hits.length){hit=true;hitPoint=hits[0].point.clone();}
     }
     if(!hit&&r.pos.y<0.1){hit=true;hitPoint=r.pos.clone();}

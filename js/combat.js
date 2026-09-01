@@ -1,7 +1,7 @@
 /* Weapons, projectiles, explosions, and structural damage. Loaded in order from index.html. */
 const WEAPONS={
-  pistol:{name:'PISTOL',mag:12,reserve:48,dmg:22,rof:0.16,spread:0.005,max:96},
-  rifle:{name:'RIFLE',mag:30,reserve:90,dmg:14,rof:0.09,spread:0.012,max:150},
+  pistol:{name:'PISTOL',mag:12,reserve:48,dmg:22,rof:0.16,spread:0,max:96},
+  rifle:{name:'RIFLE',mag:30,reserve:90,dmg:14,rof:0.09,spread:0,max:150},
   shotgun:{name:'SHOTGUN',mag:6,reserve:24,dmg:9,rof:0.55,spread:0.08,pellets:7,max:36},
   rpg:{name:'RPG',mag:1,reserve:99,dmg:250,rof:0.7,spread:0,max:99,projectile:'rocket'}
 };
@@ -44,8 +44,67 @@ function releaseBulletEffect(line){
   const pool=bulletEffectPools[line.userData.bulletEffectKind]||bulletEffectPools.tracer;
   pool.push(line);
 }
-const shotEye=V(),shotAimPoint=V(),shotStart=V(),shotBaseDir=V(),shotRayDir=V(),
-  shotSpread=V(),shotEnd=V(),shotVector=V(),shotMid=V(),shotAxis=V();
+const shotAimPoint=V(),shotStart=V(),shotBaseDir=V(),shotRayDir=V(),
+  shotSpreadRight=V(),shotSpreadUp=V(),shotEnd=V(),shotVector=V(),shotMid=V(),shotAxis=V(),
+  rocketLaunchDir=V();
+const SHOT_MAX_DISTANCE=120;
+const ROCKET_SPEED=45;
+const ROCKET_GRAVITY=9.8;
+
+function resolveCursorShot(start,targets,out){
+  /* The fixed reticle represents the centre of the rendered camera. Resolve
+     that ray against the visible world first, then converge the physical
+     muzzle ray on the same point. The old direction came from the player's
+     head and was merely copied to an offset muzzle, so it remained parallel
+     to the cursor and missed nearby targets by the full shoulder offset. */
+  camera.updateMatrixWorld(true);
+  camera.getWorldDirection(tmpDir).normalize();
+  shotAimPoint.copy(camera.position).addScaledVector(tmpDir,SHOT_MAX_DISTANCE);
+  rc.set(camera.position,tmpDir);rc.far=SHOT_MAX_DISTANCE;rc.near=0.01;
+  const cameraHits=rc.intersectObjects(targets,false);
+  if(cameraHits.length)shotAimPoint.copy(cameraHits[0].point);
+  out.subVectors(shotAimPoint,start);
+  /* A camera pressed directly into geometry can resolve a point behind the
+     muzzle. Keep the projectile moving forward in that degenerate case; its
+     own muzzle ray will still strike the intervening cover immediately. */
+  if(out.lengthSq()<0.0001||out.dot(tmpDir)<=0)out.copy(tmpDir);
+  else out.normalize();
+  return out;
+}
+
+function spreadShotDirection(baseDir,amount,out){
+  if(amount<=0)return out.copy(baseDir);
+  /* Spread belongs in the screen plane around the reticle, not in arbitrary
+     world XYZ axes. A centre pellet is supplied separately for the shotgun. */
+  shotSpreadRight.crossVectors(baseDir,UP);
+  if(shotSpreadRight.lengthSq()<0.0001)shotSpreadRight.set(1,0,0);
+  else shotSpreadRight.normalize();
+  shotSpreadUp.crossVectors(shotSpreadRight,baseDir).normalize();
+  const angle=Math.random()*Math.PI*2;
+  const radius=Math.sqrt(Math.random())*amount;
+  return out.copy(baseDir)
+    .addScaledVector(shotSpreadRight,Math.cos(angle)*radius)
+    .addScaledVector(shotSpreadUp,Math.sin(angle)*radius)
+    .normalize();
+}
+
+function solveRocketLaunch(start,target,directDir,out){
+  /* Preserve projectile gravity while zeroing it at the selected range. The
+     low ballistic solution makes the rocket pass through the reticle's world
+     point instead of inevitably dropping below it. */
+  const dx=target.x-start.x,dz=target.z-start.z,dy=target.y-start.y;
+  const horizontal=Math.hypot(dx,dz);
+  if(horizontal<0.001)return out.copy(directDir);
+  const speedSq=ROCKET_SPEED*ROCKET_SPEED;
+  const discriminant=speedSq*speedSq-ROCKET_GRAVITY*
+    (ROCKET_GRAVITY*horizontal*horizontal+2*dy*speedSq);
+  if(discriminant<0)return out.copy(directDir);
+  const tanTheta=(speedSq-Math.sqrt(discriminant))/(ROCKET_GRAVITY*horizontal);
+  const cosTheta=1/Math.sqrt(1+tanTheta*tanTheta);
+  out.set(dx/horizontal*cosTheta,tanTheta*cosTheta,dz/horizontal*cosTheta);
+  if(out.dot(directDir)<=0)return out.copy(directDir);
+  return out.normalize();
+}
 function wpnStats(){return WEAPONS[playerWpn.cur];}
 function setWeapon(name){
   if(!WEAPONS[name])return;
@@ -175,7 +234,7 @@ function fireRocket(start,dir){
   rocket.quaternion.setFromUnitVectors(UP,dir);
   scene.add(rocket);
   rockets.push({
-    mesh:rocket,pos:start.clone(),vel:dir.clone().multiplyScalar(45),
+    mesh:rocket,pos:start.clone(),vel:dir.clone().multiplyScalar(ROCKET_SPEED),
     life:4.0,trailTimer:0,dir:dir.clone()
   });
 }
@@ -716,31 +775,30 @@ function shoot(){
   camFovKick=Math.max(camFovKick,2.5);
   const crossEl=document.getElementById('cross');
   crossEl.classList.remove('recoil');void crossEl.offsetWidth;crossEl.classList.add('recoil');
-  const eye=shotEye.set(player.pos.x,player.pos.y+1.55,player.pos.z);
-  camera.getWorldDirection(tmpDir);
-  tmpDir.normalize();
-  const aimPoint=shotAimPoint.copy(camera.position).addScaledVector(tmpDir,80);
-  const camDir=shotBaseDir.subVectors(aimPoint,eye).normalize();
   /* Fire from the rendered muzzle so the projectile, flash, and weapon stay aligned. */
   const start=shotStart.fromArray(weaponMuzzlePoints[playerWpn.cur]||weaponMuzzlePoints.rpg);
   guy.updateMatrixWorld(true);
   gunGroup.localToWorld(start);
-  spawnMuzzle(start,camDir);
+  const targets=collectShotTargets();
+  const camDir=resolveCursorShot(start,targets,shotBaseDir);
   if(w.projectile==='rocket'){
-    shotSpread.set((Math.random()-0.5)*0.02,(Math.random()-0.5)*0.02,(Math.random()-0.5)*0.02);
-    const dir=shotRayDir.copy(camDir).add(shotSpread).normalize();
+    const dir=solveRocketLaunch(start,shotAimPoint,camDir,rocketLaunchDir);
+    spawnMuzzle(start,dir);
     fireRocket(start,dir);
     updateStatsUI();
     return;
   }
+  spawnMuzzle(start,camDir);
   const pellets=w.pellets||1;
-  const targets=collectShotTargets();
   for(let p=0;p<pellets;p++){
-    shotSpread.set((Math.random()-0.5)*w.spread,(Math.random()-0.5)*w.spread,(Math.random()-0.5)*w.spread);
-    const dir=shotRayDir.copy(camDir).add(shotSpread).normalize();
-    rc.set(start,dir);rc.far=120;rc.near=0.1;
+    /* Keep one shotgun pellet exactly on the reticle; the remaining pellets
+       describe the cone around it. Pistol and rifle rounds are fully centred,
+       with visible camera recoil supplying their accuracy cost. */
+    const spreadAmount=pellets>1&&p===0?0:w.spread;
+    const dir=spreadShotDirection(camDir,spreadAmount,shotRayDir);
+    rc.set(start,dir);rc.far=SHOT_MAX_DISTANCE;rc.near=0.1;
     const hits=rc.intersectObjects(targets,false);
-    const end=shotEnd.copy(start).addScaledVector(dir,80);
+    const end=shotEnd.copy(start).addScaledVector(dir,SHOT_MAX_DISTANCE);
     let hitTarget=null,hitKind=null,structuralTarget=null;
     if(hits.length){
       end.copy(hits[0].point);
