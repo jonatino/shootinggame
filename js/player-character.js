@@ -242,16 +242,15 @@ const weaponMuzzlePoints={
 const ikShoulder=V(),ikReach=V(),ikDirection=V(),ikEffectiveTarget=V(),ikBend=V();
 const ikElbow=V(),ikUpperDir=V(),ikLowerDir=V();
 const ikFrameX=V(),ikFrameY=V(),ikFrameZ=V(),ikLocalBend=V();
-const ikDownPole=V(),ikPoleSide=V();
 const ikUpperQ=new THREE.Quaternion(),ikLowerQ=new THREE.Quaternion(),ikInverseQ=new THREE.Quaternion();
 const ikFrameMatrix=new THREE.Matrix4();
 const handPalmNormal=V(),handBasisX=V(),handBasisY=V(),handBasisZ=V();
 const handWorldQ=new THREE.Quaternion(),handParentQ=new THREE.Quaternion(),handLocalQ=new THREE.Quaternion();
 const handBasis=new THREE.Matrix4(),handNeutralQ=new THREE.Quaternion();
-const bendClimbL=V(1,-0.12,-0.7),bendClimbR=V(-1,-0.12,-0.7);
+const bendClimbL=V(),bendClimbR=V();
 const bendVaultL=V(1,-0.08,-0.55),bendVaultR=V(-1,-0.08,-0.55);
 const bendGroundL=V(1,-0.32,-0.72),bendGroundR=V(-1,-0.32,-0.72);
-const bendFootClimbL=V(0.12,0,-1),bendFootClimbR=V(-0.12,0,-1);
+const bendFootClimbL=V(),bendFootClimbR=V();
 const bendFootVaultL=V(0.12,0,1),bendFootVaultR=V(-0.12,0,1);
 const bendFootGroundL=V(0.12,0,1),bendFootGroundR=V(-0.12,0,1);
 const aimWorld=V(),bodyForward=V(),bodyRight=V();
@@ -280,7 +279,11 @@ const footWorldUp=V(),footAdjustQ=new THREE.Quaternion(),footWorldQ=new THREE.Qu
 const footParentQ=new THREE.Quaternion(),footTargetQ=new THREE.Quaternion();
 const footPoseQ=new THREE.Quaternion(),footPoseEuler=new THREE.Euler();
 const weaponWorldQ=new THREE.Quaternion();
+const climbRigInverseQ=new THREE.Quaternion();
+const climbPoleWorld=V(),climbPoleSide=V(),climbPoleNormal=V();
 const PLAYER_BODY_LIFT=0.15;
+const CLIMB_FOOT_DROP=1.68,CLIMB_FOOT_MIN_HEIGHT=0.12,CLIMB_FOOT_MAX_HEIGHT=0.42;
+const CLIMB_FOOT_SPREAD=0.2;
 
 function angDiff(a,b){let d=(a-b)%(Math.PI*2);if(d>Math.PI)d-=Math.PI*2;if(d<-Math.PI)d+=Math.PI*2;return d;}
 function dampValue(a,b,rate,dt){return a+(b-a)*(1-Math.exp(-rate*dt));}
@@ -306,7 +309,7 @@ function setStableLimbQuaternion(direction,pole,out){
   return out;
 }
 
-function applyLimbIK(chain,target,bendDir,blend,keepElbowClear){
+function applyLimbIK(chain,target,bendDir,blend){
   if(!Number.isFinite(target.x)||!Number.isFinite(target.y)||!Number.isFinite(target.z))return;
   blend=Math.max(0,Math.min(1,blend));
   /* Smooth the end-effector, then solve one complete two-bone pose. Slerping
@@ -337,31 +340,6 @@ function applyLimbIK(chain,target,bendDir,blend,keepElbowClear){
   ikBend.normalize();
   const cosA=Math.max(-1,Math.min(1,(chain.upperLength*chain.upperLength+distance*distance-chain.lowerLength*chain.lowerLength)/(2*chain.upperLength*distance)));
   const sinA=Math.sqrt(Math.max(0,1-cosA*cosA));
-  if(keepElbowClear&&sinA>0.001){
-    /* Climbing hands can pass close to a shoulder while transferring between
-       neighboring facets. The unconstrained two-bone solution may then pick
-       a valid but humanly absurd elbow-above-the-head branch. Keep the elbow
-       below the hand and below the helmet while preserving its authored
-       left/right flare around the aim axis. */
-    const targetDeltaY=ikEffectiveTarget.y-ikShoulder.y;
-    const baseElbowY=ikDirection.y*cosA*chain.upperLength;
-    const elbowRadius=sinA*chain.upperLength;
-    const maxElbowY=Math.min(0.17,targetDeltaY-0.09);
-    const maxPoleY=(maxElbowY-baseElbowY)/elbowRadius;
-    if(ikBend.y>maxPoleY){
-      ikDownPole.set(0,-1,0).addScaledVector(ikDirection,ikDirection.y);
-      if(ikDownPole.lengthSq()>0.0001){
-        ikDownPole.normalize();
-        ikPoleSide.crossVectors(ikDirection,ikDownPole).normalize();
-        const sideSign=ikBend.dot(ikPoleSide)<0?-1:1;
-        const minimumDown=Math.max(0,Math.min(1,maxPoleY/ikDownPole.y));
-        const downWeight=Math.min(1,Math.max(minimumDown,ikBend.dot(ikDownPole)));
-        ikBend.copy(ikDownPole).multiplyScalar(downWeight)
-          .addScaledVector(ikPoleSide,sideSign*Math.sqrt(Math.max(0,1-downWeight*downWeight)))
-          .normalize();
-      }
-    }
-  }
   ikElbow.copy(ikShoulder)
     .addScaledVector(ikDirection,cosA*chain.upperLength)
     .addScaledVector(ikBend,sinA*chain.upperLength);
@@ -374,6 +352,27 @@ function applyLimbIK(chain,target,bendDir,blend,keepElbowClear){
   setStableLimbQuaternion(ikLowerDir,ikLocalBend,ikLowerQ);
   chain.root.quaternion.copy(ikUpperQ);
   chain.joint.quaternion.copy(ikLowerQ);
+}
+
+/* Climbing joint poles are authored in the wall's world-space frame and then
+   converted into the tilted character frame used by the two-bone solver. This
+   keeps left/right anatomical meaning stable around corners and while the body
+   leans; local XYZ constants made an elbow's "out" direction turn into "in"
+   as soon as the root rotated onto a different face. */
+function setClimbPole(normal,side,sideWeight,wallWeight,upWeight,out){
+  climbPoleNormal.copy(normal);
+  if(climbPoleNormal.lengthSq()<0.04)climbPoleNormal.copy(bodyForward).negate();
+  climbPoleNormal.setY(0);
+  if(climbPoleNormal.lengthSq()<0.04)climbPoleNormal.set(0,0,1);
+  else climbPoleNormal.normalize();
+  climbPoleSide.crossVectors(UP,climbPoleNormal);
+  if(climbPoleSide.lengthSq()<0.04)climbPoleSide.set(1,0,0);
+  else climbPoleSide.normalize();
+  climbPoleWorld.copy(climbPoleSide).multiplyScalar(side*sideWeight)
+    .addScaledVector(climbPoleNormal,wallWeight)
+    .addScaledVector(UP,upWeight);
+  out.copy(climbPoleWorld).applyQuaternion(climbRigInverseQ).normalize();
+  return out;
 }
 
 function poseHandToSurface(chain,normal,blend){
@@ -469,91 +468,59 @@ function lerpHoldWorld(a,b,t,side,out,normalOut){
   return out;
 }
 
-function pickDownFootHold(h,side){
-  if(!h||!h.down||!h.down.length)return -1;
+function climbFootPoint(h,side,out,normalOut){
+  if(!h)return out;
   holdSurfaceAnchor(h,climbSurfacePoint,climbSurfaceNormal);
   climbSideAxis.crossVectors(UP,climbSurfaceNormal);
   if(climbSideAxis.lengthSq()<0.04)climbSideAxis.set(1,0,0);
   else climbSideAxis.normalize();
-  let best=-1,bestScore=-1e9;
-  for(const j of h.down){
-    const candidate=HOLDS[j];
-    if(!candidate||!holdSurfaceIsLive(candidate))continue;
-    climbFootSearchDelta.subVectors(candidate.pos,h.pos);
-    const horizontal=Math.hypot(climbFootSearchDelta.x,climbFootSearchDelta.z);
-    const drop=Math.max(0,h.pos.y-candidate.pos.y);
-    /* Keep the ankle target inside a believable lower-body reach. Without
-       this gate a broad graph link can send a knee sideways across the torso
-       or into the wall while the hands are still carrying the weight. */
-    if(horizontal>1.18||drop<0.18||drop>1.35)continue;
-    const reach=Math.hypot(horizontal,Math.max(0.18,drop-0.12));
-    if(reach>1.28)continue;
-    const lateral=climbFootSearchDelta.dot(climbSideAxis)*side;
-    const score=lateral*0.72-horizontal*0.18-Math.abs(drop-0.72)*0.3-
-      Math.max(0,reach-0.92)*0.35;
-    if(score>bestScore){bestScore=score;best=j;}
-  }
-  return best;
-}
-function climbFootPoint(h,side,out,normalOut){
-  const footHold=pickDownFootHold(h,side);
-  const anchor=footHold>=0?HOLDS[footHold]:h;
-  holdSurfaceAnchor(anchor,climbSurfacePoint,climbSurfaceNormal);
-  climbSideAxis.crossVectors(UP,climbSurfaceNormal);
-  if(climbSideAxis.lengthSq()<0.04)climbSideAxis.set(1,0,0);
-  else climbSideAxis.normalize();
-  out.copy(climbSurfacePoint).addScaledVector(climbSurfaceNormal,CLIMB_FOOT_OFFSET).addScaledVector(climbSideAxis,side);
+  /* The player root is the planted-foot datum. Put both ankles below the hips
+     and within the actual 0.98-unit leg chain, rather than borrowing the first
+     adjacent graph node (which is normally another handhold above the pelvis). */
+  const footY=Math.max(player.pos.y+CLIMB_FOOT_MIN_HEIGHT,
+    Math.min(player.pos.y+CLIMB_FOOT_MAX_HEIGHT,climbSurfacePoint.y-CLIMB_FOOT_DROP));
+  out.copy(climbSurfacePoint).addScaledVector(climbSurfaceNormal,CLIMB_FOOT_OFFSET)
+    .addScaledVector(climbSideAxis,side);
+  out.y=footY;
   if(normalOut)normalOut.copy(climbSurfaceNormal);
-  if(footHold<0){
-    out.addScaledVector(UP,-0.88);
-    /* A handhold often has no authored lower neighbor. Do not leave the boot
-       on a guessed vertical offset in that case: on a faceted rock or an
-       overhang that point can be inside the next face. Re-project the ankle
-       onto the same live surface, using the exact wall/cell frame used by the
-       torso clearance pass. If no surface is available, the conservative
-       tucked point above remains the fallback. */
-    climbFootSearchDelta.copy(out);
-    climbFootRay.copy(climbSurfaceNormal).negate();
-    const targets=climbBodySurfaceMeshes(h);
-    const footRoot=holdSurfaceRoot(h);
-    let bestScore=Infinity,bestLateral=0;
-    /* Search above/below and slightly across the intended ankle. A single ray
-       can miss the real face on a faceted rock or hit the underside of a lip;
-       three-by-three samples keep the result local while letting the boot find
-       the same visible surface used by the torso clearance pass. */
-    for(let vi=0;vi<3;vi++){
-      const vertical=vi===0?0.3:(vi===1?0:-0.28);
-      for(let li=0;li<3;li++){
-        const lateral=li===0?-0.12:(li===1?0:0.12);
-        climbFootProbe.copy(climbFootSearchDelta)
-          .addScaledVector(UP,vertical)
-          .addScaledVector(climbSideAxis,lateral)
-          .addScaledVector(climbSurfaceNormal,1.35);
-        rc.set(climbFootProbe,climbFootRay);rc.far=2.7;rc.near=0.001;
-        const hits=rc.intersectObjects(targets,false);
-        for(const hit of hits){
-          climbFootActual.copy(wn(hit,hit.object,worldNormalScratch)).setY(0);
-          const normalDot=climbFootActual.dot(climbSurfaceNormal);
-          if(climbFootActual.lengthSq()<0.04||normalDot<0.04||
-             !colliderMatchesSurface(hit.object,footRoot,null))continue;
-          climbFootActual.normalize();
-          const score=hit.point.distanceToSquared(climbFootSearchDelta)+
-            Math.abs(vertical)*0.035+(1-normalDot)*0.12;
-          if(score<bestScore){
-            bestScore=score;
-            climbFootBestPoint.copy(hit.point);
-            climbFootBestNormal.copy(climbFootActual);
-            bestLateral=lateral;
-          }
-          break;
+  /* Re-project that anatomical target onto the real face. The ray sample
+     already contains the requested lateral spread, so the returned hit must
+     not add the spread a second time (the old double offset crossed the legs). */
+  climbFootSearchDelta.copy(out);
+  climbFootRay.copy(climbSurfaceNormal).negate();
+  const targets=climbBodySurfaceMeshes(h);
+  const footRoot=holdSurfaceRoot(h);
+  let bestScore=Infinity;
+  for(let vi=0;vi<3;vi++){
+    const vertical=vi===0?0:(vi===1?0.18:-0.18);
+    for(let li=0;li<3;li++){
+      const lateral=li===0?0:(li===1?-0.1:0.1);
+      climbFootProbe.copy(climbFootSearchDelta)
+        .addScaledVector(UP,vertical)
+        .addScaledVector(climbSideAxis,lateral)
+        .addScaledVector(climbSurfaceNormal,1.2);
+      rc.set(climbFootProbe,climbFootRay);rc.far=2.5;rc.near=0.001;
+      const hits=rc.intersectObjects(targets,false);
+      for(const hit of hits){
+        climbFootActual.copy(wn(hit,hit.object,worldNormalScratch)).setY(0);
+        const normalDot=climbFootActual.dot(climbSurfaceNormal);
+        if(climbFootActual.lengthSq()<0.04||normalDot<0.04||
+           !colliderMatchesSurface(hit.object,footRoot,null))continue;
+        climbFootActual.normalize();
+        const score=hit.point.distanceToSquared(climbFootSearchDelta)+
+          Math.abs(vertical)*0.05+Math.abs(lateral)*0.04+(1-normalDot)*0.12;
+        if(score<bestScore){
+          bestScore=score;
+          climbFootBestPoint.copy(hit.point);
+          climbFootBestNormal.copy(climbFootActual);
         }
+        break;
       }
     }
-    if(bestScore<Infinity){
-      out.copy(climbFootBestPoint).addScaledVector(climbFootBestNormal,CLIMB_FOOT_OFFSET)
-        .addScaledVector(climbSideAxis,side-bestLateral);
-      if(normalOut)normalOut.copy(climbFootBestNormal);
-    }
+  }
+  if(bestScore<Infinity){
+    out.copy(climbFootBestPoint).addScaledVector(climbFootBestNormal,CLIMB_FOOT_OFFSET);
+    if(normalOut)normalOut.copy(climbFootBestNormal);
   }
   return out;
 }
@@ -749,11 +716,12 @@ function updateGuy(dt){
      hand target beyond the 0.75-unit two-bone reach and silently folded the
      arm into the chest. Move only that shoulder inward/forward for a believable
      cross-body support pose; the trigger shoulder remains planted. */
-  const supportShoulderX=twoHandedWeapon?0.28:0.4;
+  const supportShoulderX=climbing?0.31:(twoHandedWeapon?0.28:0.4);
+  const primaryShoulderX=climbing?-0.31:-0.4;
   armL.sh.position.y=dampValue(armL.sh.position.y,1.51+shoulderLoadL+weaponShoulderLift+groundShoulderLift,18,dt);
   armR.sh.position.y=dampValue(armR.sh.position.y,1.51+shoulderLoadR+weaponShoulderLift-groundShoulderLift,18,dt);
   armL.sh.position.x=dampValue(armL.sh.position.x,supportShoulderX,18,dt);
-  armR.sh.position.x=dampValue(armR.sh.position.x,-0.4,18,dt);
+  armR.sh.position.x=dampValue(armR.sh.position.x,primaryShoulderX,18,dt);
   /* Keep the shoulder joints just inside the vest's safe exterior plane while
      the hips/backpack stay on the clearance-safe root. The old 0.34-unit reach
      drove both clavicles through a thin wall so the palms could reach it; the
@@ -764,24 +732,6 @@ function updateGuy(dt){
   const supportShoulderDepth=twoHandedWeapon?0.24:0;
   armL.sh.position.z=dampValue(armL.sh.position.z,-0.24+shoulderLoadL*0.7+climbShoulderReach+weaponShoulderReach+supportShoulderDepth-recoilLoad*0.03-groundShoulderTravel,18,dt);
   armR.sh.position.z=dampValue(armR.sh.position.z,-0.24+shoulderLoadR*0.7+climbShoulderReach+weaponShoulderReach-recoilLoad*0.03+groundShoulderTravel,18,dt);
-  /* Move the elbow poles with the loaded side of the climb. A fixed pole makes
-     both arms solve into the same straight mannequin pose even when one hand is
-     reaching and the other is carrying the body. */
-  if(climbing){
-    bendClimbL.set(1.0+climbLiftL*0.16, -0.16-climbLiftL*0.05, -0.72-climbLiftL*0.1);
-    bendClimbR.set(-1.0-climbLiftR*0.16, -0.16-climbLiftR*0.05, -0.72-climbLiftR*0.1);
-    /* The planted foot carries the body while the leading knee clears the
-       wall. Bias the bend pole toward the active side during the same
-       transfer window as the hand reach; this gives the hips a real step
-       instead of leaving both legs parallel and rigid. */
-    const leadLeft=(climbStepParity&1)===0;
-    const leadKnee=climbCompression*0.22;
-    const trailKnee=climbCompression*0.08;
-    bendFootClimbL.set(0.12+(leadLeft?0.08:-0.02),-0.045,
-      -1.0-(leadLeft?leadKnee:trailKnee));
-    bendFootClimbR.set(-0.12-(leadLeft?0.02:0.08),-0.045,
-      -1.0-(leadLeft?trailKnee:leadKnee));
-  }
   let contactHold=null,fromHold=null,toHold=null,climbTransfer=0;
 
   if(climbing){
@@ -896,8 +846,8 @@ function updateGuy(dt){
        mannequin into a diagonal plank. The old 0.44-radian lean was readable
        as a sideways fall on a narrow pole; the physical root and swept IK still
        enforce the real wall clearance, so this is only a visual chest pitch. */
-    targetTiltX=lerp(0.05,0.30,attachK)+Math.sin(now*1.8)*0.018+
-      (moving?0.04+climbLoad*0.08:0);
+    targetTiltX=lerp(0.035,0.115,attachK)+Math.sin(now*1.8)*0.012+
+      (moving?0.025+climbLoad*0.04:0);
     targetTiltZ=climbCycle*0.055+climbHangSway*0.018+Math.sin(now*1.4)*0.018+
       (moving?(0.08-0.16*climbTransfer)*climbLoad:0);
   }else if(vaulting){
@@ -1075,13 +1025,12 @@ function updateGuy(dt){
         climbHandWorldL.addScaledVector(wallNormal,settleArc);
         climbHandWorldR.addScaledVector(wallNormal,reachArc);
       }
-      /* Plant the feet on the lower hold network instead of leaving them in a
-         fixed mannequin pose. Each foot follows the wall's actual geometry,
-         which keeps knees and boots out of corners during a lateral transfer. */
-      climbFootPoint(fromHold,-0.14,climbFootFromL);
-      climbFootPoint(toHold,-0.14,climbFootToL);
-      climbFootPoint(fromHold,0.14,climbFootFromR);
-      climbFootPoint(toHold,0.14,climbFootToR);
+      /* Move each anatomical ankle target along the wall and re-project it onto
+         the live face, keeping knees and boots clear during a lateral transfer. */
+      climbFootPoint(fromHold,-CLIMB_FOOT_SPREAD,climbFootFromL);
+      climbFootPoint(toHold,-CLIMB_FOOT_SPREAD,climbFootToL);
+      climbFootPoint(fromHold,CLIMB_FOOT_SPREAD,climbFootFromR);
+      climbFootPoint(toHold,CLIMB_FOOT_SPREAD,climbFootToR);
       const leadFootT=smooth5(Math.max(0,Math.min(1,(moveT-0.1)/0.5)));
       const trailFootT=smooth5(Math.max(0,Math.min(1,(moveT-0.56)/0.38)));
       const leadLiftPhase=smooth5(Math.max(0,Math.min(1,(moveT-0.12)/0.52)));
@@ -1126,8 +1075,8 @@ function updateGuy(dt){
           body weight through the wall. */
        climbHandWorldL.y+=climbLiftL*0.028-climbLiftR*0.008;
        climbHandWorldR.y+=climbLiftR*0.028-climbLiftL*0.008;
-      climbFootPoint(contactHold,-0.14,climbFootWorldL,climbFootNormalL);
-      climbFootPoint(contactHold,0.14,climbFootWorldR,climbFootNormalR);
+      climbFootPoint(contactHold,-CLIMB_FOOT_SPREAD,climbFootWorldL,climbFootNormalL);
+      climbFootPoint(contactHold,CLIMB_FOOT_SPREAD,climbFootWorldR,climbFootNormalR);
        climbFootWorldL.y+=climbLiftL*0.07-climbLiftR*0.018;
        climbFootWorldR.y+=climbLiftR*0.07-climbLiftL*0.018;
     }
@@ -1146,14 +1095,19 @@ function updateGuy(dt){
     }
     toTiltLocal(climbHandWorldL,handTargetL);
     toTiltLocal(climbHandWorldR,handTargetR);
-    applyLimbIK(armL,handTargetL,bendClimbL,limbBlend,true);
-    applyLimbIK(armR,handTargetR,bendClimbR,limbBlend,true);
+    tilt.getWorldQuaternion(climbRigInverseQ).invert();
+    setClimbPole(climbHandNormalL,-1,1,0.7,-0.7,bendClimbL);
+    setClimbPole(climbHandNormalR,1,1,0.7,-0.7,bendClimbR);
+    applyLimbIK(armL,handTargetL,bendClimbL,limbBlend);
+    applyLimbIK(armR,handTargetR,bendClimbR,limbBlend);
     guy.updateMatrixWorld(true);
     poseHandToSurface(armL,climbHandNormalL,limbBlend);
     poseHandToSurface(armR,climbHandNormalR,limbBlend);
     /* The body faces the wall while climbing, so local +Z is the wall-facing side. */
     toTiltLocal(climbFootWorldL,footTargetL);
     toTiltLocal(climbFootWorldR,footTargetR);
+    setClimbPole(moving?wallNormal:climbFootNormalL,-1,0.24,1,0,bendFootClimbL);
+    setClimbPole(moving?wallNormal:climbFootNormalR,1,0.24,1,0,bendFootClimbR);
     applyLimbIK(legL,footTargetL,bendFootClimbL,limbBlend);
     applyLimbIK(legR,footTargetR,bendFootClimbR,limbBlend);
     /* A climbing foot presses its sole into the same surface normal as the
