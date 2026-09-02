@@ -1346,14 +1346,22 @@ function lowVaultPathClearance(from,to,clearance,push,obstacle,landing){
   }
   return true;
 }
-function tryAutoLowVault(dir,speed){
-  if(player.mode!=='ground'||!player.onGround||dir.lengthSq()<0.01||speed<4.2||
-     player.cool>0||player.grace>0||player.vaultRecovery>0||player.jumpBuffer>0)return false;
+function tryAutoLowVault(dir,speed,targetSpeed){
+  /* Input can begin with the capsule already touching low cover. Collision
+     resolution then erases the tiny first-frame velocity before it ever
+     reaches the old 4.2-unit trigger threshold, leaving the player glued to
+     an otherwise valid waist-high obstacle. Give committed forward input a
+     bounded start assist; established movement still supplies its real speed
+     and therefore keeps walk/sprint timing distinct. */
+  const assistedSpeed=Math.max(speed,Math.min(targetSpeed||speed,8.8));
+  const recoveringMantle=player.vaultRecovery>0&&player.vaultKind!=='low';
+  if(player.mode!=='ground'||!player.onGround||dir.lengthSq()<0.01||assistedSpeed<4.2||
+     player.cool>0||player.grace>0||recoveringMantle||player.jumpBuffer>0)return false;
   lowVaultForward.copy(dir).setY(0);
   if(lowVaultForward.lengthSq()<0.01)return false;
   lowVaultForward.normalize();
   const baseY=player.pos.y;
-  const lookAhead=Math.max(0.78,Math.min(1.08,0.64+speed*0.017));
+  const lookAhead=Math.max(0.78,Math.min(1.08,0.64+assistedSpeed*0.017));
   lowVaultProbeOrigin.copy(player.pos).addScaledVector(UP,0.34);
   rc.set(lowVaultProbeOrigin,lowVaultForward);rc.far=lookAhead;rc.near=0.02;
   const hits=rc.intersectObjects(
@@ -1417,7 +1425,7 @@ function tryAutoLowVault(dir,speed){
   const heightBlend=Math.max(0,Math.min(1,
     (obstacleHeight-AUTO_VAULT_MIN_HEIGHT)/(AUTO_VAULT_MAX_HEIGHT-AUTO_VAULT_MIN_HEIGHT)));
   const speedBlend=Math.max(0,Math.min(1,
-    (speed-7)/(PLAYER_SPRINT_SPEED-7)));
+    (assistedSpeed-7)/(PLAYER_SPRINT_SPEED-7)));
   const depthBlend=Math.max(0,Math.min(1,edgeDepth/AUTO_VAULT_MAX_DEPTH));
   const clearance=0.48+heightBlend*0.2+speedBlend*0.055;
   const push=0.07+depthBlend*0.1;
@@ -1437,7 +1445,7 @@ function tryAutoLowVault(dir,speed){
   player.vaultLandingNormal.copy(lowVaultLandingNormal);
   player.vaultObstacleHeight=obstacleHeight;
   player.vaultObstacleDepth=edgeDepth;
-  player.vaultEntrySpeed=speed;
+  player.vaultEntrySpeed=assistedSpeed;
   player.vaultFrom.copy(player.pos);
   player.vaultTo.copy(lowVaultLandingPoint);
   player.vaultDuration=Math.max(0.3,Math.min(0.44,
@@ -1747,7 +1755,7 @@ function groundStep(dt,dir){
   movementAccelWorld.x=dampValue(movementAccelWorld.x,targetAccelX,18,dt);
   movementAccelWorld.z=dampValue(movementAccelWorld.z,targetAccelZ,18,dt);
   const autoVaultSpeed=Math.hypot(player.vel.x,player.vel.z);
-  if(hasInput&&tryAutoLowVault(dir,autoVaultSpeed)){
+  if(hasInput&&tryAutoLowVault(dir,autoVaultSpeed,spd)){
     moveSpeed+=(autoVaultSpeed-moveSpeed)*Math.min(1,dt*8);
     walkAmt=autoVaultSpeed;
     sprinting=false;camRollTarget=0;
@@ -2085,8 +2093,13 @@ function vaultStep(dt){
        side before normal obstruction correction resumes. Movement remains
        live during this window; only the just-cleared mantle corridor is
        treated as recoverable camera space. */
-    player.cool=lowVault?0.14:0.25;
-    player.grace=lowVault?0.18:1.8;
+    /* Only suppress the just-cleared obstacle for a couple of simulation
+       frames. The body can keep blending out of its landing pose for 180 ms,
+       but physics must already be eligible to vault a second close barrier;
+       tying both concerns to the same timer caused an impossible dead stop in
+       chained cover. */
+    player.cool=lowVault?0.035:0.25;
+    player.grace=lowVault?0.05:1.8;
     if(lowVault){
       moveSpeed=Math.max(moveSpeed,vaultExitVelocity.length());
       walkAmt=vaultExitVelocity.length();

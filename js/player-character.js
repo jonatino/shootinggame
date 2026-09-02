@@ -1533,7 +1533,16 @@ function updateCam(dt){
   camPitchKick*=(1-Math.min(1,dt*8));
   camYawKick*=(1-Math.min(1,dt*8));
   camFovKick=Math.max(0,camFovKick-dt*8);
-  const baseFov=75+(sprinting?8:0)+camFovKick+cameraSpeed*0.27;
+  /* game-loop deliberately clears the sprint flag while a vault owns root
+     motion. Preserve the FOV contribution from the entry velocity so a fast
+     auto-vault does not visibly zoom inward at takeoff and back out at the
+     landing frame. */
+  const lowVaultFovActive=player.vaultKind==='low'&&
+    (player.mode==='vault'||lowVaultCameraRecovery);
+  const lowVaultFovBlend=lowVaultFovActive?Math.max(0,Math.min(1,
+    (player.vaultEntrySpeed-PLAYER_WALK_SPEED)/
+    Math.max(0.01,PLAYER_SPRINT_SPEED-PLAYER_WALK_SPEED))):0;
+  const baseFov=75+(sprinting?8:lowVaultFovBlend*8)+camFovKick+cameraSpeed*0.27;
   curFov+=(baseFov-curFov)*(1-Math.exp(-8*dt));
   if(camera.fov!==curFov){
     camera.fov=curFov;
