@@ -278,6 +278,7 @@ const vaultFootAuthoredL=V(),vaultFootAuthoredR=V();
 const vaultPlantLocalL=V(),vaultPlantLocalR=V();
 const footWorldUp=V(),footAdjustQ=new THREE.Quaternion(),footWorldQ=new THREE.Quaternion();
 const footParentQ=new THREE.Quaternion(),footTargetQ=new THREE.Quaternion();
+const footPoseQ=new THREE.Quaternion(),footPoseEuler=new THREE.Euler();
 const weaponWorldQ=new THREE.Quaternion();
 const PLAYER_BODY_LIFT=0.15;
 
@@ -590,11 +591,15 @@ function plantGroundFoot(localTarget,worldOut,normalOut,clearance=0){
   return false;
 }
 
-function updateGroundGaitFoot(phase,side,stride,lift,bodyBounce,swingWindow,target,worldOut,normalOut){
+function updateGroundGaitFoot(phase,side,stride,lift,bodyBounce,swingWindow,runBlend,
+  target,worldOut,normalOut){
   let z=0,clearance=0;
   if(phase<swingWindow){
     const t=phase/swingWindow;
-    z=lerp(-stride,stride,smooth5(t));
+    /* Recover the boot from behind the body, fold it under the hip, then reach
+       decisively for the next plant. The old almost-flat fore/aft sweep was
+       mostly hidden by the chase camera and read as two rigid legs. */
+    z=lerp(-stride*0.82,stride,smooth5(t));
     clearance=Math.sin(Math.PI*t)*lift;
   }else{
     /* At arcade movement speeds a literal world-space foot lock exceeds the
@@ -605,12 +610,26 @@ function updateGroundGaitFoot(phase,side,stride,lift,bodyBounce,swingWindow,targ
     const t=(phase-swingWindow)/(1-swingWindow);
     z=lerp(stride,-stride,t);
   }
-  target.set(side*(0.13+clearance*0.06),0.1-bodyBounce+clearance,z);
+  const swingArc=lift>0.001?clearance/lift:0;
+  /* Open the airborne knee toward the camera-side silhouette. A real runner
+     does not move both knees on one perfectly overlapping rail, and this
+     lateral recovery is what makes the stride readable from directly behind. */
+  const lateral=0.13+runBlend*0.025+swingArc*(0.035+runBlend*0.045);
+  target.set(side*lateral,0.1-bodyBounce+clearance,z);
   plantGroundFoot(target,worldOut,normalOut,clearance);
   return clearance;
 }
 
-function alignFootSurface(chain,normalWorld,blend){
+function groundGaitFootPitch(phase,swingWindow,runBlend){
+  if(phase<swingWindow){
+    const t=phase/swingWindow;
+    return lerp(-0.24,0.16,smooth5(t))-Math.sin(Math.PI*t)*(0.12+runBlend*0.2);
+  }
+  const t=(phase-swingWindow)/(1-swingWindow);
+  return lerp(0.12,-0.08,t)*(0.55+runBlend*0.45);
+}
+
+function alignFootSurface(chain,normalWorld,blend,pitch=0,roll=0){
   if(!chain.foot)return;
   const n=normalWorld&&normalWorld.lengthSq()>0.25?normalWorld:UP;
   chain.foot.getWorldQuaternion(footWorldQ);
@@ -619,6 +638,11 @@ function alignFootSurface(chain,normalWorld,blend){
   footWorldQ.premultiply(footAdjustQ);
   chain.foot.parent.getWorldQuaternion(footParentQ).invert();
   footTargetQ.copy(footParentQ).multiply(footWorldQ);
+  if(Math.abs(pitch)>0.0001||Math.abs(roll)>0.0001){
+    footPoseEuler.set(pitch,0,roll,'XYZ');
+    footPoseQ.setFromEuler(footPoseEuler);
+    footTargetQ.multiply(footPoseQ);
+  }
   chain.foot.quaternion.slerp(footTargetQ,Math.max(0,Math.min(1,blend)));
 }
 
@@ -667,16 +691,17 @@ function updateGuy(dt){
   const groundSpeedBlend=walking?Math.min(1,walkAmt/PLAYER_WALK_SPEED):0;
   const runGait=walking?weaponSprint:0;
   if(walking){
-    const cadence=lerp(9.8,13.2,groundSpeedBlend)+runGait*4.8;
+    const cadence=lerp(10.2,14.2,groundSpeedBlend)+runGait*7.2;
     walkPhase=(walkPhase+dt*cadence)%(Math.PI*2);
   }
   const gait=Math.sin(walkPhase);
   const gaitCos=Math.cos(walkPhase);
   const stepPulse=Math.cos(walkPhase*2);
-  const gaitRoll=walking?gait*(0.055+runGait*0.035):0;
-  const gaitYaw=walking?gait*(0.075+runGait*0.055):0;
-  const gaitPitch=walking?gaitCos*(0.018+runGait*0.018):0;
-  const bodyBounce=walking?stepPulse*(0.042+runGait*0.026):0;
+  const gaitRoll=walking?gait*(0.08+runGait*0.055):0;
+  const gaitYaw=walking?gait*(0.105+runGait*0.08):0;
+  const gaitPitch=walking?gaitCos*(0.026+runGait*0.024):0;
+  const bodyBounce=walking?stepPulse*(0.058+runGait*0.045):0;
+  const gaitWeightShift=walking?-gait*(0.024+runGait*0.032):0;
   /* Drive the weight shift from the same progress value that moves the root
      and hand targets. A free-running oscillator could put the hips on the
      wrong side of the transfer when a long corner link took more time. */
@@ -708,8 +733,8 @@ function updateGuy(dt){
     (lowVault?(lowVaultPlantLeft?0.065:0.022):(player.vaultLeadLeft?0.045:0.018)):0);
   const shoulderLoadR=climbing?climbLiftR*0.035:(vaulting?
     (lowVault?(lowVaultPlantLeft?0.022:0.065):(player.vaultLeadLeft?0.018:0.045)):0);
-  const groundShoulderLift=walking?gait*(0.022+runGait*0.026):0;
-  const groundShoulderTravel=walking?gaitCos*(0.018+runGait*0.03):0;
+  const groundShoulderLift=walking?gait*(0.035+runGait*0.04):0;
+  const groundShoulderTravel=walking?gaitCos*(0.03+runGait*0.05):0;
   /* A mantle owns both hands until its landing recovery is finished. Treating
      that frame as a weapon-ready pose let the shoulder rig fight the vault
      brace and was a common source of a one-frame arm pop. */
@@ -883,8 +908,8 @@ function updateGuy(dt){
       lowVaultSide*Math.sin(vaultK*Math.PI)*(0.075+vaultHeightBlend*0.045):
       0.035+Math.sin(vaultK*Math.PI)*0.025;
   }else{
-    targetTiltX=Math.max(-0.08,Math.min(0.14,
-      forwardLoad*0.075+movementAccel*0.025+accelForward*0.045+(sprinting?0.035:(walking?0.018:0))+
+    targetTiltX=Math.max(-0.08,Math.min(0.2,
+      forwardLoad*0.08+movementAccel*0.025+accelForward*0.045+(sprinting?0.07:(walking?0.025:0))+
       (inAir?-0.08:0)-landingKick*0.1-recoilLoad*0.045));
     targetTiltZ=Math.max(-0.14,Math.min(0.14,
       camRollTarget*0.65-sideLoad*0.035+turnLoad*0.045+recoilRoll*0.25));
@@ -904,6 +929,7 @@ function updateGuy(dt){
     (vaulting?vaultArc*(lowVault?0.075:0.03)-vaultLandingLoad*(lowVault?0.085:0.06):
       bodyBounce*0.45-landingKick*0.055);
   pelvis.position.y=dampValue(pelvis.position.y,0.92+pelvisBob,14,dt);
+  pelvis.position.x=dampValue(pelvis.position.x,gaitWeightShift,16,dt);
   pelvis.rotation.x=dampValue(pelvis.rotation.x,
     climbing?0.04-climbLoad*0.08:(vaulting?(lowVault?0.08+vaultArc*0.07:0.025):
       gaitPitch-recoilLoad*0.018),10,dt);
@@ -915,6 +941,7 @@ function updateGuy(dt){
       (walking?-gaitRoll+groundSideLean:Math.sin(now*1.5)*0.012))+recoilRoll*0.16,10,dt);
   torso.position.y=dampValue(torso.position.y,1.18+bodyBounce*0.35-landingKick*0.04-
     vaultLandingLoad*0.045-climbCompression*0.035-recoilLoad*0.018,14,dt);
+  torso.position.x=dampValue(torso.position.x,-gaitWeightShift*0.42,14,dt);
   torso.rotation.x=dampValue(torso.rotation.x,climbing?-0.07:
     (vaulting?(lowVault?-0.18-vaultArc*0.09-vaultLandingLoad*0.1:
       -0.12-vaultLandingLoad*0.08):
@@ -929,6 +956,7 @@ function updateGuy(dt){
         (walking?gaitRoll*0.82+groundSideLean*0.55:groundSideLean*0.35))+recoilRoll*0.55,9,dt);
   head.position.y=dampValue(head.position.y,1.78+bodyBounce*0.18-landingKick*0.03-
     climbCompression*0.016-recoilLoad*0.012,14,dt);
+  head.position.x=dampValue(head.position.x,-gaitWeightShift*0.26,13,dt);
   head.rotation.y=dampAngle(head.rotation.y,Math.max(-0.75,Math.min(0.75,aimYaw*(climbing?0.7:0.45))),11,dt);
   head.rotation.x=dampValue(head.rotation.x,Math.max(-0.45,Math.min(0.55,
     aimPitch*0.42+(climbing?-0.08:0)-recoilPitch*0.3-recoilLoad*0.02)),11,dt);
@@ -936,8 +964,12 @@ function updateGuy(dt){
     (lowVault?-lowVaultSide*vaultArc*0.045:
       (walking?-gaitRoll*0.38:Math.sin(now*1.1)*0.01))+recoilRoll*0.35,10,dt);
   const hipY=0.92-landingKick*0.055-climbCompression*0.025;
-  const hipLift=walking?gaitCos*(0.008+runGait*0.006):0;
-  const hipTravel=walking?gait*(0.025+runGait*0.025):0;
+  const hipLift=walking?gaitCos*(0.014+runGait*0.012):0;
+  const hipTravel=walking?gait*(0.04+runGait*0.05):0;
+  const leftHipOut=walking?Math.max(0,gait)*(0.02+runGait*0.025):0;
+  const rightHipOut=walking?Math.max(0,-gait)*(0.02+runGait*0.025):0;
+  legL.hip.position.x=dampValue(legL.hip.position.x,0.13+leftHipOut,18,dt);
+  legR.hip.position.x=dampValue(legR.hip.position.x,-0.13-rightHipOut,18,dt);
   legL.hip.position.y=dampValue(legL.hip.position.y,hipY+hipLift,14,dt);
   legR.hip.position.y=dampValue(legR.hip.position.y,hipY-hipLift,14,dt);
   legL.hip.position.z=dampValue(legL.hip.position.z,hipTravel,18,dt);
@@ -976,11 +1008,11 @@ function updateGuy(dt){
     /* Both weapon hands sample this same transform below. A stronger shared
        gait therefore articulates shoulders and elbows while the palms remain
        physically attached to their grips. */
-    const swayX=walking?gait*(0.018+runGait*0.024):Math.cos(now*0.8)*0.0025;
-    const swayY=walking?-stepPulse*(0.02+runGait*0.026):Math.sin(now*1.2)*0.003;
-    const swayZ=walking?gaitCos*(0.012+runGait*0.026):0;
-    const swayPitch=walking?stepPulse*(0.012+runGait*0.022):0;
-    const swayRoll=walking?gait*(0.034+runGait*0.038):0;
+    const swayX=walking?gait*(0.026+runGait*0.045):Math.cos(now*0.8)*0.0025;
+    const swayY=walking?-stepPulse*(0.03+runGait*0.045):Math.sin(now*1.2)*0.003;
+    const swayZ=walking?gaitCos*(0.02+runGait*0.035):0;
+    const swayPitch=walking?stepPulse*(0.02+runGait*0.035):0;
+    const swayRoll=walking?gait*(0.05+runGait*0.065):0;
     /* The cooldown kick is the fast muzzle impulse. The independent recoil
        state supplies the slower stock push that the hands and shoulders track. */
     const recoilZ=-kickRatio*0.07-recoilLoad*0.045;
@@ -988,9 +1020,9 @@ function updateGuy(dt){
        This is one shared transform: the IK hand targets below are sampled from
        the same group, so the hands, elbows, and weapon remain one physical
        pose instead of three independently animated parts. */
-    const sprintX=weaponSprint*0.035;
-    const sprintY=-weaponSprint*0.12;
-    const sprintZ=weaponSprint*0.13;
+    const sprintX=weaponSprint*0.055;
+    const sprintY=-weaponSprint*0.19;
+    const sprintZ=weaponSprint*0.18;
      const movementWeaponSway=(walking?sideLoad*0.018:0)+accelSide*0.022;
      const movementWeaponDip=(walking?movementAccel*0.02:0)+accelForward*0.022;
      const movementWeaponPush=(walking?forwardLoad*0.018:0)-accelForward*0.018;
@@ -1001,11 +1033,11 @@ function updateGuy(dt){
     const weaponAimYaw=Math.max(-1.35,Math.min(1.35,aimYaw));
     /* Local weapon forward is -Z, so its pitch sign is opposite the camera aim angle. */
     const weaponAimPitch=-aimPitch+kickRatio*(playerWpn.cur==='rpg'?0.08:0.045)+
-      weaponSprint*0.24+recoilPitch*0.72+swayPitch;
+      weaponSprint*0.33+recoilPitch*0.72+swayPitch;
     /* Weapon meshes point along local -Z; rotate 180° onto the character's +Z forward axis. */
     gunGroup.rotation.y=dampAngle(gunGroup.rotation.y,weaponAimYaw+Math.PI,18,dt);
     gunGroup.rotation.x=dampValue(gunGroup.rotation.x,weaponAimPitch,18,dt);
-    gunGroup.rotation.z=dampValue(gunGroup.rotation.z,swayRoll-weaponSprint*0.12-
+    gunGroup.rotation.z=dampValue(gunGroup.rotation.z,swayRoll-weaponSprint*0.18-
       sideLoad*0.035+turnLoad*0.04+camYawKick*0.5+recoilRoll*0.8,16,dt);
     gunGroup.scale.setScalar(dampValue(gunGroup.scale.x,1,16,dt));
   }
@@ -1312,22 +1344,22 @@ function updateGuy(dt){
     poseHandToWeapon(armR,limbBlend,profile.primaryGrip);
     if(profile.support)poseHandToWeapon(armL,limbBlend,profile.supportGrip);
     else relaxHand(armL,limbBlend);
-    const stride=lerp(0.46,0.62,runGait);
-    const lift=lerp(0.19,0.32,runGait);
-    const swingWindow=lerp(0.43,0.47,runGait);
+    const stride=lerp(0.5,0.74,runGait);
+    const lift=lerp(0.23,0.5,runGait);
+    const swingWindow=lerp(0.45,0.53,runGait);
     const airLift=inAir?Math.min(0.38,0.1+Math.abs(player.vel.y)*0.035):0;
     if(walking){
       const cycle=fract(walkPhase/(Math.PI*2));
       const leftPhase=cycle,rightPhase=fract(cycle+0.5);
       const leftLift=updateGroundGaitFoot(leftPhase,1,stride,lift,bodyBounce,
-        swingWindow,footTargetL,groundFootWorldL,groundFootNormalL);
+        swingWindow,runGait,footTargetL,groundFootWorldL,groundFootNormalL);
       const rightLift=updateGroundGaitFoot(rightPhase,-1,stride,lift,bodyBounce,
-        swingWindow,footTargetR,groundFootWorldR,groundFootNormalR);
+        swingWindow,runGait,footTargetR,groundFootWorldR,groundFootNormalR);
       /* Separate knee poles let the airborne knee drive forward while the
          stance knee remains loaded. A shared pole left both legs rotating as
          one rigid pair even when their ankle targets differed. */
-      bendFootGroundL.set(0.12+leftLift*0.2,-0.04,1+leftLift*0.9);
-      bendFootGroundR.set(-0.12-rightLift*0.2,-0.04,1+rightLift*0.9);
+      bendFootGroundL.set(0.12+leftLift*0.32,-0.04,1+leftLift*1.35);
+      bendFootGroundR.set(-0.12-rightLift*0.32,-0.04,1+rightLift*1.35);
     }else{
       footTargetL.set(0.13,0.1-bodyBounce+airLift,0);
       footTargetR.set(-0.13,0.1-bodyBounce+airLift,0);
@@ -1340,11 +1372,17 @@ function updateGuy(dt){
       bendFootGroundL.set(0.12,-0.04,1);
       bendFootGroundR.set(-0.12,-0.04,1);
     }
-    const gaitLimbBlend=walking?1-Math.exp(-26*dt):limbBlend;
+    const gaitLimbBlend=walking?1-Math.exp(-34*dt):limbBlend;
     applyLimbIK(legL,footTargetL,bendFootGroundL,gaitLimbBlend);
     applyLimbIK(legR,footTargetR,bendFootGroundR,gaitLimbBlend);
-    alignFootSurface(legL,groundFootNormalL,gaitLimbBlend*0.8);
-    alignFootSurface(legR,groundFootNormalR,gaitLimbBlend*0.8);
+    const leftFootPitch=walking?groundGaitFootPitch(fract(walkPhase/(Math.PI*2)),
+      swingWindow,runGait):0;
+    const rightFootPitch=walking?groundGaitFootPitch(
+      fract(walkPhase/(Math.PI*2)+0.5),swingWindow,runGait):0;
+    alignFootSurface(legL,groundFootNormalL,gaitLimbBlend*0.86,leftFootPitch,
+      walking?-gaitRoll*0.18:0);
+    alignFootSurface(legR,groundFootNormalR,gaitLimbBlend*0.86,rightFootPitch,
+      walking?gaitRoll*0.18:0);
   }
   const handState=climbing?'climb':(vaulting?'vault':'weapon');
   updateHandDetail(armL,profile.support?handState:(climbing||vaulting?handState:'relaxed'),dt);
@@ -1365,7 +1403,10 @@ function updateCam(dt){
      distance made the arms sub-pixel at the exact moment their contact pose
      needed to be readable. */
   const cameraSpeed=Math.min(moveSpeed,PLAYER_SPRINT_SPEED);
-  const dist=5.6*camZoom*(1+cameraSpeed*0.008)*(traversalCamera?0.84:1);
+  /* FOV already communicates speed. Pulling the camera twenty percent farther
+     away at a sprint made every knee/ankle motion sub-pixel and was the main
+     reason a real gait still looked like a sliding mannequin. */
+  const dist=5.6*camZoom*(1+cameraSpeed*0.003)*(traversalCamera?0.84:1);
   camTmp1.set(player.pos.x,player.pos.y+1.55,player.pos.z); /* target height */
   camTmp2.set(Math.sin(camYaw)*Math.cos(camPitch),Math.sin(camPitch),Math.cos(camYaw)*Math.cos(camPitch)); /* offset dir */
   /* desired camera position with dynamic shoulder offset */
