@@ -6,8 +6,148 @@ const groundProbeOrigin=V();
 const rocketPrev=V(),rocketTravel=V(),rocketAxis=V();
 const worldNormalScratch=V();
 
+/* Mantle targets are physical footprints, not mathematical points. Voxel
+   instances are intentionally rendered at 94% of their grid size, so a hold
+   centroid can line up exactly with a narrow bevel between two otherwise
+   continuous roof cells. Probe a small area around both the lip and landing;
+   the radius stays inside the player's body footprint, requires real support,
+   and still rejects a missing landing footprint. These samples are shared by
+   graph cooking, live mantle fallback, and cached-target revalidation. */
+const MANTLE_DEPTH_OFFSETS=[-0.4,-0.2,0.1,0.35,0.6,0.85];
+const MANTLE_LIP_FOOTPRINT=[
+  [0,0],[0,-0.08],[0,0.08],[0,-0.18],[0,0.18]
+];
+const MANTLE_LANDING_FOOTPRINT=[
+  [0,0],[-0.08,0],[0,-0.08],[0,0.08],
+  [-0.08,-0.08],[-0.08,0.08],[0.08,0],
+  [0.08,-0.08],[0.08,0.08],[-0.16,0],
+  [0,-0.18],[0,0.18],[0.16,0]
+];
+const mantleRayOrigin=V(),mantleSurfacePoint=V(),mantleSurfaceNormal=V();
+const mantleProbeFlat=V(),mantleProbeSide=V(),mantleProbeBase=V(),mantleLandingBase=V();
+const mantleStandableCandidates=[];
+
 function wn(hit,mesh,out){
   return (out||new THREE.Vector3()).copy(hit.face.normal).transformDirection(mesh.matrixWorld);
+}
+
+function mantleProbeAxes(out,flat,side){
+  flat.copy(out).setY(0);
+  if(flat.lengthSq()<1e-4)flat.set(0,0,1);
+  else flat.normalize();
+  side.crossVectors(UP,flat);
+  if(side.lengthSq()<1e-4)side.set(1,0,0);
+  else side.normalize();
+}
+
+function nearbyStandables(origin,dir,far){
+  /* Reuse the world XZ broadphase rather than raycasting every voxel building
+     for every footprint sample. All walkable meshes are registered as camera
+     occluders too; the membership check preserves the stricter standables-only
+     mantle contract. */
+  const nearby=getCameraOccluderCandidates(origin,dir,far);
+  mantleStandableCandidates.length=0;
+  for(const mesh of nearby){
+    if(standables.indexOf(mesh)<0)continue;
+    const ud=mesh.userData,parent=ud&&ud.parent;
+    /* Static voxel fields participate in camera fading, so the camera
+       broadphase conservatively lists every field as dynamic. Their authored
+       structure bounds are stable and let mantle rays discard distant
+       buildings before Three.js walks hundreds of instances in each mesh. */
+    if(ud&&ud.kind==='voxelField'&&parent&&parent.worldBox){
+      const bounds=parent.worldBox,margin=0.7;
+      if(origin.x<bounds.min.x-margin||origin.x>bounds.max.x+margin||
+         origin.z<bounds.min.z-margin||origin.z>bounds.max.z+margin)continue;
+    }
+    mantleStandableCandidates.push(mesh);
+  }
+  return mantleStandableCandidates;
+}
+
+function mantleHitHasOpenColumn(hit){
+  const mesh=hit&&hit.object,ud=mesh&&mesh.userData;
+  let st=ud&&ud.voxelStructure,cell=-1;
+  if(st){
+    if(hit.instanceId===undefined||hit.instanceId<0)return false;
+    cell=st.instanceToCell[hit.instanceId];
+  }else{
+    const root=ud&&ud.surfaceRoot||mesh,rootData=root&&root.userData;
+    /* An attached fracture-cell proxy still describes its original grid
+       column. Once released it is an independent physical object, so there is
+       no parent column above it to invalidate its top face. */
+    if(!rootData||rootData.kind!=='cell'||rootData.released)return true;
+    const parent=rootData.parent;
+    st=parent&&parent.voxelStructure;
+    if(!st||rootData.gridX===undefined||rootData.gridY===undefined||
+       rootData.gridZ===undefined)return true;
+    cell=(rootData.gridY*st.nz+rootData.gridZ)*st.nx+rootData.gridX;
+  }
+  if(cell<0||cell>=st.count||!st.alive[cell])return false;
+  /* A ray that begins inside a tall voxel wall can see the beveled top of an
+     internal cell. Only the highest surviving cell in that XZ column is a
+     genuine ledge with room for the body above it. */
+  const layer=st.nx*st.nz;
+  for(let above=cell+layer;above<st.count;above+=layer)
+    if(st.alive[above])return false;
+  return true;
+}
+
+function mantleDownHit(center,flat,side,footprint,fromY,far,accept){
+  for(const offset of footprint){
+    mantleRayOrigin.copy(center)
+      .addScaledVector(flat,offset[0]).addScaledVector(side,offset[1]);
+    mantleRayOrigin.y=fromY;
+    rc.set(mantleRayOrigin,DOWN);rc.far=far;rc.near=0.001;
+    const hits=rc.intersectObjects(nearbyStandables(mantleRayOrigin,DOWN,far),false);
+    for(const hit of hits){
+      if(!hit.face)continue;
+      const normal=wn(hit,hit.object,worldNormalScratch);
+      if(normal.y<=0.55)continue;
+      if(!mantleHitHasOpenColumn(hit))continue;
+      if(accept&&!accept(hit,normal))continue;
+      return {hit,normal:normal.clone()};
+    }
+  }
+  return null;
+}
+
+function findMantleLanding(h,minimumLandingY){
+  if(!h)return null;
+  if(!h.vault)h.vault=V();
+  holdSurfaceAnchor(h,mantleSurfacePoint,mantleSurfaceNormal);
+  mantleProbeAxes(mantleSurfaceNormal,mantleProbeFlat,mantleProbeSide);
+  const lipProbeY=mantleSurfacePoint.y+2.2;
+  for(const depth of MANTLE_DEPTH_OFFSETS){
+    mantleProbeBase.copy(mantleSurfacePoint).addScaledVector(mantleProbeFlat,depth);
+    let approvedLanding=null;
+    mantleDownHit(mantleProbeBase,mantleProbeFlat,mantleProbeSide,
+      MANTLE_LIP_FOOTPRINT,lipProbeY,4.6,(hit)=>{
+        const rise=hit.point.y-mantleSurfacePoint.y;
+        if(rise<=0.3||rise>=2.2)return false;
+        /* The desired root is deliberately behind the lip. Verify the actual
+           top under that point with the same seam-tolerant footprint instead
+           of trusting the first edge hit. */
+        mantleLandingBase.copy(hit.point).addScaledVector(mantleProbeFlat,-0.38);
+        approvedLanding=mantleDownHit(mantleLandingBase,mantleProbeFlat,mantleProbeSide,
+          MANTLE_LANDING_FOOTPRINT,mantleLandingBase.y+1.2,2.4,(landing)=>{
+            if(landing.point.y<minimumLandingY||
+               Math.abs(landing.point.y-mantleLandingBase.y)>=0.5)return false;
+            const holdDx=landing.point.x-h.pos.x,holdDz=landing.point.z-h.pos.z;
+            if(holdDx*holdDx+holdDz*holdDz>2.2*2.2)return false;
+            const lipDx=landing.point.x-mantleLandingBase.x,
+              lipDz=landing.point.z-mantleLandingBase.z;
+            if(lipDx*lipDx+lipDz*lipDz>0.72*0.72)return false;
+            return surfaceObjectIsLive(landing.object);
+          });
+        return !!approvedLanding;
+      });
+    if(!approvedLanding)continue;
+    h.vault.copy(approvedLanding.hit.point).addScaledVector(UP,0.02);
+    h.vaultMesh=approvedLanding.hit.object;
+    h.vaultNormal.copy(approvedLanding.normal).normalize();
+    return h.vault;
+  }
+  return null;
 }
 
 function downHit(p,out,off,lipY,mesh){
@@ -218,25 +358,11 @@ function linkHolds(H,computeVault){
     }
   }
   if(!computeVault)return links;
-  for(const h of H){
-    holdSurfaceAnchor(h,climbSurfacePoint,climbSurfaceNormal);
-    const o=h.surfacePos.clone().addScaledVector(h.surfaceOut,0.45);
-    o.y+=1.7;
-    rc.set(o,DOWN);rc.far=3.2;rc.near=0.001;
-    const hits=rc.intersectObjects(standables,false);
-    for(const hit of hits){
-      const normal=wn(hit,hit.object,worldNormalScratch);
-      const rise=hit.point.y-h.pos.y;
-      if(normal.y>0.55&&rise>0.3&&rise<2.2){
-        /* Land a little beyond the lip, on the far side of the wall plane,
-           so the mantle has horizontal travel instead of a vertical snap. */
-        h.vault=hit.point.clone().addScaledVector(h.surfaceOut,-0.38).addScaledVector(UP,0.02);
-        h.vaultMesh=hit.object;
-        h.vaultNormal.copy(normal).normalize();
-        break;
-      }
-    }
-  }
+  /* Only terminal graph nodes need an eager mantle hint. Holds with an upward
+     route continue climbing normally and perform the same live probe if that
+     route later disappears or becomes blocked. This avoids cooking thousands
+     of irrelevant roof rays through tall voxel walls. */
+  for(const h of H)if(!h.up.length)computeHoldVault(h);
   return links;
 }
 
@@ -298,21 +424,11 @@ function addIncrementalHoldLinks(H,start){
 }
 
 function computeHoldVault(h){
-  holdSurfaceAnchor(h,climbSurfacePoint,climbSurfaceNormal);
-  const o=h.surfacePos.clone().addScaledVector(h.surfaceOut,0.45);
-  o.y+=1.7;
-  rc.set(o,DOWN);rc.far=3.2;rc.near=0.001;
-  const hits=rc.intersectObjects(standables,false);
-  for(const hit of hits){
-    const normal=wn(hit,hit.object,worldNormalScratch);
-    const rise=hit.point.y-h.pos.y;
-    if(normal.y>0.55&&rise>0.3&&rise<2.2){
-      h.vault=hit.point.clone().addScaledVector(h.surfaceOut,-0.38).addScaledVector(UP,0.02);
-      h.vaultMesh=hit.object;
-      h.vaultNormal.copy(normal).normalize();
-      return;
-    }
-  }
+  h.vault=null;h.vaultMesh=null;h.vaultNormal.set(0,1,0);
+  if(findMantleLanding(h,h.pos.y+0.3))return;
+  /* findMantleLanding keeps a reusable vector while probing. Failed graph
+     cooks must not expose that placeholder as a real traversal target. */
+  h.vault=null;h.vaultMesh=null;h.vaultNormal.set(0,1,0);
 }
 
 function refreshClimbGraphIncremental(){
@@ -345,8 +461,10 @@ function refreshClimbGraphIncremental(){
   }
   const added=cluster(raw);
   for(const h of added)next.push(h);
-  for(let i=newStart;i<next.length;i++)computeHoldVault(next[i]);
   const links=addIncrementalHoldLinks(next,newStart);
+  /* Link first so eager vault cooking remains limited to new terminal nodes,
+     matching a full graph rebuild. */
+  for(let i=newStart;i<next.length;i++)if(!next[i].up.length)computeHoldVault(next[i]);
   HOLDS=next;
   if(old.length&&player){
     player.hold=findRemappedHold(oldHold,HOLDS);

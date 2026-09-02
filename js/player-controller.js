@@ -858,7 +858,8 @@ function startMove(j){
 
 const climbPathFromPos=V(),climbPathToPos=V(),climbPathNormal=V(),climbPathSample=V();
 const climbPathSurfaceFrom=V(),climbPathSurfaceTo=V(),climbPathSurface=V();
-const vaultPathNormal=V(),vaultPathSample=V(),vaultTargetProbe=V(),vaultTargetRay=V();
+const vaultPathNormal=V(),vaultPathSample=V(),vaultTargetExpected=V();
+const vaultTargetFlat=V(),vaultTargetSide=V();
 const vaultDesiredPos=V(),vaultMotionFrom=V(),vaultMotionDelta=V();
 const vaultExitVelocity=V();
 const lowVaultForward=V(),lowVaultProbeOrigin=V(),lowVaultProbePoint=V();
@@ -1471,26 +1472,26 @@ function refreshVaultTarget(h){
      Accept a neighboring surface from the same structural parent when the
      original cell has been replaced by the fracture field. */
   const previousRoot=h.vaultMesh.userData&&h.vaultMesh.userData.surfaceRoot||h.vaultMesh;
-  vaultTargetProbe.set(h.vault.x,h.vault.y+0.92,h.vault.z);
-  vaultTargetRay.copy(DOWN);
-  rc.set(vaultTargetProbe,vaultTargetRay);rc.far=1.9;rc.near=0.001;
-  const hits=rc.intersectObjects(standables,false);
-  for(const hit of hits){
-      const normal=wn(hit,hit.object,worldNormalScratch);
-    if(normal.y<=0.55||!surfaceObjectIsLive(hit.object))continue;
-    if(hit.point.y<player.pos.y+0.38||Math.abs(hit.point.y-h.vault.y)>0.45)continue;
-    const dx=hit.point.x-h.vault.x,dz=hit.point.z-h.vault.z;
-    if(dx*dx+dz*dz>0.72*0.72)continue;
-    const hitRoot=hit.object.userData&&hit.object.userData.surfaceRoot||hit.object;
-    const sameParent=structuralColliderParent(hitRoot)&&
-      structuralColliderParent(hitRoot)===structuralColliderParent(previousRoot);
-    if(hitRoot!==previousRoot&&!sameParent)continue;
-    h.vault.copy(hit.point).addScaledVector(UP,0.02);
-    h.vaultMesh=hit.object;
-    h.vaultNormal.copy(normal).normalize();
-    return true;
-  }
-  return false;
+  vaultTargetExpected.copy(h.vault);
+  holdSurfaceAnchor(h,climbSurfacePoint,climbSurfaceNormal);
+  mantleProbeAxes(climbSurfaceNormal,vaultTargetFlat,vaultTargetSide);
+  const result=mantleDownHit(vaultTargetExpected,vaultTargetFlat,vaultTargetSide,
+    MANTLE_LANDING_FOOTPRINT,vaultTargetExpected.y+0.92,1.9,(hit)=>{
+      if(!surfaceObjectIsLive(hit.object))return false;
+      if(hit.point.y<player.pos.y+0.38||
+         Math.abs(hit.point.y-vaultTargetExpected.y)>0.45)return false;
+      const dx=hit.point.x-vaultTargetExpected.x,dz=hit.point.z-vaultTargetExpected.z;
+      if(dx*dx+dz*dz>0.72*0.72)return false;
+      const hitRoot=hit.object.userData&&hit.object.userData.surfaceRoot||hit.object;
+      const sameParent=structuralColliderParent(hitRoot)&&
+        structuralColliderParent(hitRoot)===structuralColliderParent(previousRoot);
+      return hitRoot===previousRoot||sameParent;
+    });
+  if(!result)return false;
+  h.vault.copy(result.hit.point).addScaledVector(UP,0.02);
+  h.vaultMesh=result.hit.object;
+  h.vaultNormal.copy(result.normal).normalize();
+  return true;
 }
 
 function startVault(){
@@ -1554,52 +1555,10 @@ function startVault(){
 }
 
 function mantleTarget(h){
-  /* tryUp clears the graph-time target before probing the live landing surface;
-     keep the cache reusable without requiring every caller to manufacture a
-     new vector. */
-  if(!h.vault)h.vault=V();
-  holdSurfaceAnchor(h,climbSurfacePoint,climbSurfaceNormal);
-  const flat=V(climbSurfaceNormal.x,0,climbSurfaceNormal.z);
-  if(flat.lengthSq()<1e-4)flat.set(0,0,1);
-  flat.normalize();
-  const minimumLandingY=player.pos.y+0.38;
-  for(const off of[-0.4,-0.2,0.1,0.35,0.6,0.85]){
-    const o=V(h.pos.x,h.pos.y+2.2,h.pos.z).addScaledVector(flat,off);
-    rc.set(o,DOWN);rc.far=4.6;rc.near=0.001;
-    const hits=rc.intersectObjects(standables,false);
-    for(const hit of hits){
-      const hitNormal=wn(hit,hit.object,worldNormalScratch);
-      if(hitNormal.y<=0.55||hit.point.y<=h.pos.y-0.45)continue;
-      const land=hit.point.clone().addScaledVector(flat,-0.38).add(V(0,0.02,0));
-      rc.set(V(land.x,land.y+1.2,land.z),DOWN);rc.far=2.4;rc.near=0.001;
-      const chk=rc.intersectObjects(standables,false);
-      for(const landing of chk){
-        const landingNormal=wn(landing,landing.object,worldNormalScratch);
-        if(landingNormal.y<=0.55||landing.point.y<minimumLandingY||
-           Math.abs(landing.point.y-land.y)>=0.5)continue;
-        const landingDx=landing.point.x-h.pos.x,landingDz=landing.point.z-h.pos.z;
-        if(landingDx*landingDx+landingDz*landingDz>2.2*2.2)continue;
-        const lipDx=landing.point.x-land.x,lipDz=landing.point.z-land.z;
-        if(lipDx*lipDx+lipDz*lipDz>0.72*0.72)continue;
-        if(!surfaceObjectIsLive(landing.object))continue;
-        /* Store the surface found by the same probe that approved the target.
-           This prevents a mantle from using a graph-time point that now ends in
-           open air after rubble or another prop has changed the scene. */
-        /* The downward probe is authoritative for all three coordinates. Keep
-           the exact hit point instead of carrying the earlier lip sample into
-           the animation; that sample can be a few centimeters outside a thin
-           top face even when the probe itself found a valid landing. */
-        h.vault.copy(landing.point);h.vault.y+=0.02;
-        h.vaultMesh=landing.object;
-        h.vaultNormal.copy(landingNormal).normalize();
-        return h.vault;
-      }
-      /* A missing landing probe is not a safe mantle. Try another sample along
-         the lip instead of accepting an unverified point that can clip through
-         a thin ledge or a freshly destroyed roof. */
-    }
-  }
-  return null;
+  /* Use the same footprint sampler as graph cooking. The live minimum height
+     prevents a newly moved surface below the hanging body from becoming a
+     landing while still allowing a valid roof beside a visual voxel seam. */
+  return findMantleLanding(h,player.pos.y+0.38);
 }
 
 function pickMin(h,arr){
