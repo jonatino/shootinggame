@@ -27,6 +27,54 @@ const mantleRayOrigin=V(),mantleSurfacePoint=V(),mantleSurfaceNormal=V();
 const mantleProbeFlat=V(),mantleProbeSide=V(),mantleProbeBase=V(),mantleLandingBase=V();
 const mantleStandableCandidates=[];
 
+/* Runtime climb queries only ever need holds within arm's reach. Keep the
+   cooked graph in a small 3D hash instead of scanning every hold in the world
+   when the player stands beside a densely sampled rock. Moving fracture-cell
+   holds are kept out of the static hash and checked separately. */
+const CLIMB_HOLD_GRID_CELL=2;
+const climbHoldGrid=new Map(),climbHoldQueryIndices=[],climbHoldDynamicIndices=[];
+let climbHoldGridCount=0;
+function climbHoldGridKey(x,y,z){return x+'_'+y+'_'+z;}
+function rebuildClimbHoldGrid(){
+  climbHoldGrid.clear();
+  climbHoldDynamicIndices.length=0;
+  for(let i=0;i<HOLDS.length;i++){
+    const h=HOLDS[i],root=h&&h.mesh&&h.mesh.userData&&h.mesh.userData.surfaceRoot||h&&h.mesh;
+    const ud=root&&root.userData;
+    if(ud&&ud.kind==='cell'&&ud.released&&!ud.sleeping){
+      climbHoldDynamicIndices.push(i);
+      continue;
+    }
+    const p=h.pos;
+    const key=climbHoldGridKey(Math.floor(p.x/CLIMB_HOLD_GRID_CELL),
+      Math.floor(p.y/CLIMB_HOLD_GRID_CELL),Math.floor(p.z/CLIMB_HOLD_GRID_CELL));
+    let bucket=climbHoldGrid.get(key);
+    if(!bucket){bucket=[];climbHoldGrid.set(key,bucket);}
+    bucket.push(i);
+  }
+  climbHoldGridCount=HOLDS.length;
+}
+function nearbyClimbHoldIndices(point,radius,mesh){
+  if(climbHoldGridCount!==HOLDS.length)rebuildClimbHoldGrid();
+  climbHoldQueryIndices.length=0;
+  const minX=Math.floor((point.x-radius)/CLIMB_HOLD_GRID_CELL);
+  const maxX=Math.floor((point.x+radius)/CLIMB_HOLD_GRID_CELL);
+  const minY=Math.floor((point.y-radius)/CLIMB_HOLD_GRID_CELL);
+  const maxY=Math.floor((point.y+radius)/CLIMB_HOLD_GRID_CELL);
+  const minZ=Math.floor((point.z-radius)/CLIMB_HOLD_GRID_CELL);
+  const maxZ=Math.floor((point.z+radius)/CLIMB_HOLD_GRID_CELL);
+  const append=i=>{
+    const h=HOLDS[i];
+    if(h&&(!mesh||h.mesh===mesh))climbHoldQueryIndices.push(i);
+  };
+  for(let gx=minX;gx<=maxX;gx++)for(let gy=minY;gy<=maxY;gy++)for(let gz=minZ;gz<=maxZ;gz++){
+    const bucket=climbHoldGrid.get(climbHoldGridKey(gx,gy,gz));
+    if(bucket)for(const i of bucket)append(i);
+  }
+  for(const i of climbHoldDynamicIndices)append(i);
+  return climbHoldQueryIndices;
+}
+
 function wn(hit,mesh,out){
   return (out||new THREE.Vector3()).copy(hit.face.normal).transformDirection(mesh.matrixWorld);
 }
@@ -114,13 +162,14 @@ function mantleDownHit(center,flat,side,footprint,fromY,far,accept){
 function findMantleLanding(h,minimumLandingY){
   if(!h)return null;
   if(!h.vault)h.vault=V();
+  h.vaultLipY=NaN;
   holdSurfaceAnchor(h,mantleSurfacePoint,mantleSurfaceNormal);
   mantleProbeAxes(mantleSurfaceNormal,mantleProbeFlat,mantleProbeSide);
   const lipProbeY=mantleSurfacePoint.y+2.2;
   for(const depth of MANTLE_DEPTH_OFFSETS){
     mantleProbeBase.copy(mantleSurfacePoint).addScaledVector(mantleProbeFlat,depth);
     let approvedLanding=null;
-    mantleDownHit(mantleProbeBase,mantleProbeFlat,mantleProbeSide,
+    const lipLanding=mantleDownHit(mantleProbeBase,mantleProbeFlat,mantleProbeSide,
       MANTLE_LIP_FOOTPRINT,lipProbeY,4.6,(hit)=>{
         const rise=hit.point.y-mantleSurfacePoint.y;
         if(rise<=0.3||rise>=2.2)return false;
@@ -141,10 +190,11 @@ function findMantleLanding(h,minimumLandingY){
           });
         return !!approvedLanding;
       });
-    if(!approvedLanding)continue;
+    if(!approvedLanding||!lipLanding)continue;
     h.vault.copy(approvedLanding.hit.point).addScaledVector(UP,0.02);
     h.vaultMesh=approvedLanding.hit.object;
     h.vaultNormal.copy(approvedLanding.normal).normalize();
+    h.vaultLipY=lipLanding.hit.point.y;
     return h.vault;
   }
   return null;
@@ -245,8 +295,45 @@ function collectCellClimbSamples(mesh){
   return samples;
 }
 
+function collectVoxelFieldClimbSamples(mesh,raw){
+  const ud=mesh&&mesh.userData,st=ud&&ud.voxelStructure;
+  if(!st||!st.activeN)return;
+  const layer=st.nx*st.nz;
+  const alive=(x,y,z)=>x>=0&&x<st.nx&&y>=0&&y<st.ny&&z>=0&&z<st.nz&&
+    !!st.alive[(y*st.nz+z)*st.nx+x];
+  const pushFace=(x,y,z,axis,sign)=>{
+    const out=axis===0?V(sign,0,0):V(0,0,sign);
+    const surface=V(
+      st.origin.x+(x+0.5)*st.sx,
+      st.origin.y+(y+0.5)*st.sy,
+      st.origin.z+(z+0.5)*st.sz
+    );
+    if(axis===0)surface.x+=sign*st.sx*0.5;
+    else surface.z+=sign*st.sz*0.5;
+    /* Keep graph points just outside the physical face while retaining the
+       exact face separately for hands, body clearance, and reach tests. */
+    raw.push({
+      pos:surface.clone().addScaledVector(out,0.06),
+      surfacePos:surface,out,surfaceOut:out.clone(),standable:false,mesh,
+      exactSurface:true,clusterFace:(axis===0?'x':'z')+(sign>0?'+':'-')
+    });
+  };
+  for(let y=0;y<st.ny;y++)for(let z=0;z<st.nz;z++)for(let x=0;x<st.nx;x++){
+    const i=y*layer+z*st.nx+x;
+    if(!st.alive[i])continue;
+    if(!alive(x-1,y,z))pushFace(x,y,z,0,-1);
+    if(!alive(x+1,y,z))pushFace(x,y,z,0,1);
+    if(!alive(x,y,z-1))pushFace(x,y,z,2,-1);
+    if(!alive(x,y,z+1))pushFace(x,y,z,2,1);
+  }
+}
+
 function detectObject(mesh,raw){
   const ud=mesh&&mesh.userData;
+  if(ud&&ud.voxelClimbSource){
+    collectVoxelFieldClimbSamples(mesh,raw);
+    return;
+  }
   if(ud&&ud.kind==='cell'){
     if(!ud.climbSamples)ud.climbSamples=collectCellClimbSamples(mesh);
     for(const sample of ud.climbSamples)
@@ -288,10 +375,18 @@ function cluster(raw){
      tessellation triangle on rocks and subdivided facades. */
   const cellSize=0.62;
   for(const r of raw){
-    const k=Math.round(r.pos.x/cellSize)+'_'+Math.round(r.pos.y/cellSize)+'_'+Math.round(r.pos.z/cellSize);
+    const k=Math.round(r.pos.x/cellSize)+'_'+Math.round(r.pos.y/cellSize)+'_'+
+      Math.round(r.pos.z/cellSize)+'_'+(r.clusterFace||'');
     let e=map.get(k);
-    if(!e){e={pos:V(),out:V(),standable:false,mesh:null,n:0};map.set(k,e);}
+    if(!e){
+      e={pos:V(),out:V(),surfacePos:V(),surfaceOut:V(),exactN:0,
+        standable:false,mesh:null,n:0};
+      map.set(k,e);
+    }
     e.pos.add(r.pos);e.out.add(r.out);
+    if(r.exactSurface){
+      e.surfacePos.add(r.surfacePos);e.surfaceOut.add(r.surfaceOut);e.exactN++;
+    }
     e.standable=e.standable||r.standable;
     if(!e.mesh)e.mesh=r.mesh;
     e.n++;
@@ -299,12 +394,18 @@ function cluster(raw){
   const out=[];
   map.forEach(e=>{
     e.pos.multiplyScalar(1/e.n);e.out.normalize();
+    const exact=e.exactN===e.n&&e.exactN>0;
+    if(exact){
+      e.surfacePos.multiplyScalar(1/e.exactN);
+      e.surfaceOut.normalize();
+    }
     out.push({
       pos:e.pos,out:e.out,standable:e.standable,mesh:e.mesh,
-      surfacePos:V(),surfaceOut:V(),surfaceReady:false,
+      surfacePos:exact?e.surfacePos:V(),surfaceOut:exact?e.surfaceOut:V(),
+      surfaceReady:exact,voxelSurface:exact,
       surfaceLocalPos:V(),surfaceLocalReady:false,
       surfaceTransformPos:V(),surfaceTransformQuat:new THREE.Quaternion(),surfaceTransformReady:false,
-      up:[],down:[],side:[],vault:null,vaultMesh:null,vaultNormal:V(0,1,0)
+      up:[],down:[],side:[],vault:null,vaultMesh:null,vaultLipY:NaN,vaultNormal:V(0,1,0)
     });
   });
   return out;
@@ -424,11 +525,11 @@ function addIncrementalHoldLinks(H,start){
 }
 
 function computeHoldVault(h){
-  h.vault=null;h.vaultMesh=null;h.vaultNormal.set(0,1,0);
+  h.vault=null;h.vaultMesh=null;h.vaultLipY=NaN;h.vaultNormal.set(0,1,0);
   if(findMantleLanding(h,h.pos.y+0.3))return;
   /* findMantleLanding keeps a reusable vector while probing. Failed graph
      cooks must not expose that placeholder as a real traversal target. */
-  h.vault=null;h.vaultMesh=null;h.vaultNormal.set(0,1,0);
+  h.vault=null;h.vaultMesh=null;h.vaultLipY=NaN;h.vaultNormal.set(0,1,0);
 }
 
 function refreshClimbGraphIncremental(){
@@ -466,6 +567,7 @@ function refreshClimbGraphIncremental(){
      matching a full graph rebuild. */
   for(let i=newStart;i<next.length;i++)if(!next[i].up.length)computeHoldVault(next[i]);
   HOLDS=next;
+  rebuildClimbHoldGrid();
   if(old.length&&player){
     player.hold=findRemappedHold(oldHold,HOLDS);
     player.moveFrom=findRemappedHold(oldMoveFrom,HOLDS);
@@ -491,6 +593,7 @@ function rebuildClimbGraph(computeVault){
   const next=cluster(raw);
   const links=linkHolds(next,computeVault);
   HOLDS=next;
+  rebuildClimbHoldGrid();
   if(old.length&&player){
     player.hold=findRemappedHold(oldHold,HOLDS);
     player.moveFrom=findRemappedHold(oldMoveFrom,HOLDS);

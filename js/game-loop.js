@@ -26,7 +26,7 @@ function update(dt){
   const ix=(keys.KeyD?1:0)-(keys.KeyA?1:0);
   const iz=(keys.KeyW?1:0)-(keys.KeyS?1:0);
   moveDir.set(moveFwd.x*iz+moveRight.x*ix,0,moveFwd.z*iz+moveRight.z*ix);
-  if(moveDir.lengthSq()>0)moveDir.normalize();
+  if(moveDir.lengthSq()>0){moveDir.normalize();movementInputSampled=true;}
   else if(performance.now()<movementIntentUntil)moveDir.copy(movementIntentDir);
 
   if(player.mode==='ground')groundStep(dt,moveDir);
@@ -62,13 +62,25 @@ const PROFILE=new URLSearchParams(location.search).has('profile');
 let tickStart=0,gameTime=0,renderTime=0,profileNext=0;
 
 let last=performance.now();
+let gameFrameRequest=null;
+resumeGameLoop=()=>{
+  if(gameFrameRequest!==null||!started)return;
+  last=performance.now();
+  gameFrameRequest=requestAnimationFrame(tick);
+};
+suspendGameLoop=()=>{
+  if(gameFrameRequest===null)return;
+  cancelAnimationFrame(gameFrameRequest);
+  gameFrameRequest=null;
+};
 function tick(){
-  requestAnimationFrame(tick);
+  gameFrameRequest=null;
+  if(!started)return;
   const now=performance.now();
   const dt=Math.min(0.05,(now-last)/1000);
   last=now;
   tickStart=now;
-  if(started)update(dt);
+  update(dt);
   renderer.render(scene,camera);
   renderTime=performance.now()-tickStart-gameTime;
   if(PROFILE&&now>=profileNext){
@@ -83,8 +95,14 @@ function tick(){
     }
     profileNext=now+100;
   }
+  if(started)gameFrameRequest=requestAnimationFrame(tick);
 }
-tick();
+
+/* Render one prepared chase-camera frame behind the play gate, then leave the
+   GPU idle until resumeGameLoop is called by an explicit play action. */
+updateCam(1/60);
+updateGuy(1/60);
+renderer.render(scene,camera);
 
 setTimeout(()=>{
   try{
@@ -96,7 +114,6 @@ setTimeout(()=>{
           stats.holds+' holds · '+stats.links+' links · '+voxelPhysics.stats().structures+' voxel buildings ready';
         setTimeout(()=>{
            document.getElementById('load').style.display='none';
-           started=true;
            updateStatsUI();
          },700);
       }catch(e){

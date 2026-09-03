@@ -43,16 +43,14 @@ function addRockFormation(cx,cz,segments,climbable){
   dObj.climbFamilyKey='rock:'+cx.toFixed(3)+':'+cz.toFixed(3);
   dObj.loRefs=[];
   if(climbable){
-    for(const s of segments){
-      const lo=new THREE.Mesh(rockGeo(16,12,s.r,s.h,s.seed),M.rock);
-      lo.position.set(cx,s.yBase+s.h*0.5,cz);
-      /* The proxy supplies dense handhold samples, while support validity and
-         collision come from the fixed voxel field underneath it. */
-      lo.userData.surfaceRoot=structure.mesh;
-      lo.updateMatrixWorld(true);
-      proxies.push({mesh:lo,grip:1});
-      dObj.loRefs.push(lo);
-    }
+    /* Climb the same exposed voxel faces that render and collide. The former
+       hidden cylinder proxy routinely placed a hold one or two block layers
+       behind the visible rock; body clearance then moved the root outward and
+       made both arms report out-of-reach. `detectObject` recognizes this flag
+       and cooks the field without raycasting thousands of instances. */
+    structure.mesh.userData.voxelClimbSource=true;
+    proxies.push({mesh:structure.mesh,grip:1});
+    dObj.loRefs.push(structure.mesh);
   }
   return dObj;
 }

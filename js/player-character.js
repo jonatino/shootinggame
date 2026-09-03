@@ -267,7 +267,6 @@ const climbHoldNormal=V(),climbSideAxis=V();
 const footTargetL=V(),footTargetR=V();
 const wallNormal=V();
 const hangFromPos=V(),hangToPos=V();
-const pickSideAxis=V(),pickSideDelta=V();
 const climbFootSearchDelta=V(),climbFootProbe=V(),climbFootRay=V(),climbFootActual=V();
 const climbFootBestPoint=V(),climbFootBestNormal=V(0,0,1);
 const climbFootNormalL=V(0,0,1),climbFootNormalR=V(0,0,1);
@@ -633,10 +632,11 @@ function updateGuy(dt){
   const vaultK=vaulting?(mode==='vault'?Math.max(0,Math.min(1,player.vaultT)):1):0;
   const vaultArc=4*vaultK*(1-vaultK);
   const vaultHeightBlend=lowVault?Math.max(0,Math.min(1,
-    (player.vaultObstacleHeight-AUTO_VAULT_MIN_HEIGHT)/
-    (AUTO_VAULT_MAX_HEIGHT-AUTO_VAULT_MIN_HEIGHT))):0;
+    (player.vaultObstacleHeight-LOW_VAULT_MIN_HEIGHT)/
+    (LOW_VAULT_MAX_HEIGHT-LOW_VAULT_MIN_HEIGHT))):0;
   const vaultSpeedBlend=lowVault?Math.max(0,Math.min(1,
-    (player.vaultEntrySpeed-7)/(PLAYER_SPRINT_SPEED-7))):0;
+    (player.vaultEntrySpeed-PLAYER_WALK_SPEED)/
+    Math.max(0.01,PLAYER_SPRINT_SPEED-PLAYER_WALK_SPEED))):0;
   const lowVaultPlantLeft=!player.vaultLeadLeft;
   const lowVaultSide=lowVaultPlantLeft?1:-1;
   /* The first ground frame after a mantle carries the landing load. Keep that
@@ -1356,11 +1356,12 @@ function updateCam(dt){
      doing precise hand/foot work against a surface; keeping the normal combat
      distance made the arms sub-pixel at the exact moment their contact pose
      needed to be readable. */
-  const cameraSpeed=Math.min(moveSpeed,PLAYER_SPRINT_SPEED);
-  /* FOV already communicates speed. Pulling the camera twenty percent farther
-     away at a sprint made every knee/ankle motion sub-pixel and was the main
-     reason a real gait still looked like a sliding mannequin. */
-  const dist=5.6*camZoom*(1+cameraSpeed*0.003)*(traversalCamera?0.84:1);
+  const sprintCameraBlend=sprinting?
+    Math.max(0,Math.min(1,moveSpeed/PLAYER_SPRINT_SPEED)):0;
+  /* Keep the normal chase framing stable. Sprint is communicated with a
+     restrained FOV change; walking into a collider must never lift or pull the
+     camera even if input remains held. */
+  const dist=5.6*camZoom*(traversalCamera?0.84:1);
   camTmp1.set(player.pos.x,player.pos.y+1.55,player.pos.z); /* target height */
   camTmp2.set(Math.sin(camYaw)*Math.cos(camPitch),Math.sin(camPitch),Math.cos(camYaw)*Math.cos(camPitch)); /* offset dir */
   /* desired camera position with dynamic shoulder offset */
@@ -1369,66 +1370,10 @@ function updateCam(dt){
   camTmp3.x+=Math.cos(camYaw)*0.55;
   camTmp3.y+=0.25;
   camTmp3.z-=Math.sin(camYaw)*0.55;
-  const vaultingCamera=player.mode==='vault';
-  const exitingVaultCamera=(player.mode==='ground'&&player.grace>0&&player.hold>=0)||
-    lowVaultCameraRecovery;
-  const climbingCamera=traversalCamera;
-  if(climbingCamera){
-    camClimbNormal.set(0,0,0);camClimbSide.set(0,0,0);
-    const h=HOLDS[player.hold]||HOLDS[player.moveTo];
-    if(h){
-      holdSurfaceAnchor(h,climbSurfacePoint,camClimbNormal);
-      camClimbSide.crossVectors(UP,camClimbNormal).normalize();
-      /* A strict over-the-shoulder camera hides the hands behind the wall.
-         A small tangent reveal keeps the contact side visible without
-         abandoning the player's physical position or turning the camera into
-         a free spectator. */
-       camTmp3.addScaledVector(camClimbSide,(vaultingCamera||exitingVaultCamera)?0.62:1.18);
-    }
-  }
+  /* Traversal may shorten the chase distance, but it never owns azimuth or
+     pitch. Derive the camera ray solely from camYaw/camPitch and the normal
+     shoulder offset so climbing cannot silently orbit the user's view. */
   camTmp2.copy(camTmp3).sub(camTmp1);
-  if(vaultingCamera&&camClimbNormal.lengthSq()>0.25){
-    /* During a mantle keep the chase camera on the approach side of the wall.
-       Blending toward the sampled outward normal prevents the obstruction
-       solver from choosing a high/low escape point that turns the shot into a
-       top-down view, while the blend fades as the landing completes. */
-    const desiredLength=camTmp2.length();
-    camAltDir.copy(camClimbNormal).normalize().multiplyScalar(desiredLength);
-    camAltDir.y=Math.max(-desiredLength*0.24,Math.min(desiredLength*0.42,camTmp2.y));
-    const vaultViewBlend=0.2*(1-0.45*smooth5(Math.max(0,Math.min(1,player.vaultT))));
-    camTmp2.lerp(camAltDir,vaultViewBlend);
-  }
-  if(climbingCamera&&camClimbNormal.lengthSq()>0.25){
-    /* Do not let a user-facing camera orbit pass through the wall while the
-       character is attached. Preserve the requested view when it is already
-       outside, but require a small outward component when looking toward the
-       surface so the body and hands remain visible. */
-    const desiredLength=camTmp2.length();
-    const outward=camTmp2.dot(camClimbNormal);
-    /* Keep the camera decisively on the exterior side of a climbable face.
-       A tiny outward bias is technically enough to avoid the wall, but still
-       leaves the rock between the lens and the character, which made the
-       hands/forearms disappear during a hang. Use a real fraction of the
-       chase radius so the body silhouette stays readable around corners. */
-    const minimumOutward=Math.max(vaultingCamera?0.78:1.05,
-      desiredLength*(vaultingCamera?0.34:0.28));
-    if(outward<minimumOutward){
-      const vertical=camTmp2.y;
-      camTmp2.addScaledVector(camClimbNormal,minimumOutward-outward);
-      /* The wall push changes only the horizontal azimuth. Rescaling the full
-         vector here used to magnify its vertical component and throw the
-         traversal camera into a top-down view when the desired point was
-         behind a neighboring rock. Preserve the player's look pitch and
-         restore the original horizontal radius instead. */
-      camTmp2.y=vertical;
-      const correctedHorizontal=Math.hypot(camTmp2.x,camTmp2.z);
-      const desiredHorizontal=Math.sqrt(Math.max(0.001,desiredLength*desiredLength-vertical*vertical));
-      if(correctedHorizontal>0.001){
-        const horizontalScale=desiredHorizontal/correctedHorizontal;
-        camTmp2.x*=horizontalScale;camTmp2.z*=horizontalScale;
-      }
-    }
-  }
   const L=camTmp2.length()||1;
   camTmp2.divideScalar(L);
   rc.set(camTmp1,camTmp2);rc.far=L;rc.near=0.05;
@@ -1447,41 +1392,8 @@ function updateCam(dt){
     }
     if(!isCameraFadeable(hit.object)){hardHit=hit;break;}
   }
-  if(hardHit&&((player.mode==='ground'&&player.grace<=0)||climbingCamera)){
-    /* A mantle or wall hang can leave the desired chase point inside a large
-       neighboring prop. Shrinking the camera to the player's neck is
-       technically collision-safe but reads as a snap; resolving that box by
-       its nearest world axis can also throw the view straight overhead. Try a
-       deterministic shoulder orbit first, keeping the full chase distance
-       whenever another azimuth is clear. */
-    const baseYaw=Math.atan2(camTmp2.x,camTmp2.z),flat=Math.hypot(camTmp2.x,camTmp2.z);
-    let bestDistance=d,bestSoft=null,bestFound=false;
-    for(const offset of cameraOrbitOffsets){
-      const yaw=baseYaw+offset;
-      camAltDir.set(Math.sin(yaw)*flat,camTmp2.y,Math.cos(yaw)*flat);
-      rc.set(camTmp1,camAltDir);rc.far=L;rc.near=0.05;
-      const altHits=rc.intersectObjects(getCameraOccluderCandidates(camTmp1,camAltDir,L),false);
-      let altHard=null,altSoft=null;
-      for(const alt of altHits){
-        if(isVaultCameraSurface(alt.object))continue;
-        if(isCameraFadeable(alt.object)){if(!altSoft)altSoft=alt;continue;}
-        altHard=alt;break;
-      }
-      const altDistance=altHard?Math.max(1.15,altHard.distance-0.35):
-        (altSoft?Math.max(2.15,altSoft.distance-0.42):L);
-      if(altDistance>bestDistance){
-        bestDistance=altDistance;bestSoft=altSoft;camBestDir.copy(camAltDir);bestFound=true;
-      }
-      if(!altHard&&!altSoft){
-        bestDistance=L;bestSoft=null;camBestDir.copy(camAltDir);bestFound=true;break;
-      }
-    }
-    if(bestFound){
-      camTmp2.copy(camBestDir);d=bestDistance;hardHit=null;softHit=bestSoft;
-      cameraFadeHits.length=0;
-      if(bestSoft)cameraFadeHits.push(bestSoft.object);
-    }
-  }
+  /* Obstructions may pull the camera closer along its requested ray, but may
+     never choose another azimuth. Only mouse input is allowed to turn view. */
   if(hardHit)d=Math.max(1.15,hardHit.distance-0.35);
   /* Moving rubble is a soft obstruction, but it still occupies the line
      between the player and the chase camera. Stop before the first piece so
@@ -1508,19 +1420,8 @@ function updateCam(dt){
   /* look a little ahead of travel for a more dynamic feel */
   camTmp3.copy(camTmp1);
   camTmp3.x+=Math.cos(camYaw)*0.55;
-  camTmp3.y+=0.25+cameraSpeed*0.055;
+  camTmp3.y+=0.25;
   camTmp3.z-=Math.sin(camYaw)*0.55;
-  if(player.mode==='attach'||player.mode==='move'||player.mode==='hang'||player.mode==='vault'||exitingVaultCamera)
-    camTmp3.addScaledVector(camClimbSide,0.28);
-  if(player.mode==='vault'){
-    /* Keep the landing in frame during a mantle without snapping the camera
-       to the destination. This makes the transfer readable on tall or uneven
-       ledges while the body continues to follow the physical path. */
-    const vaultLook=0.08+0.12*smooth5(Math.max(0,Math.min(1,player.vaultT)));
-    camTmp3.x+=(player.vaultTo.x-camTmp1.x)*vaultLook;
-    camTmp3.y+=(player.vaultTo.y+1.0-camTmp1.y)*vaultLook;
-    camTmp3.z+=(player.vaultTo.z-camTmp1.z)*vaultLook;
-  }
   camera.lookAt(camTmp3);
   camera.rotation.z+=camRoll;
   camera.rotation.x+=camPitchKick;
@@ -1530,14 +1431,14 @@ function updateCam(dt){
   camFovKick=Math.max(0,camFovKick-dt*8);
   /* game-loop deliberately clears the sprint flag while a vault owns root
      motion. Preserve the FOV contribution from the entry velocity so a fast
-     auto-vault does not visibly zoom inward at takeoff and back out at the
+     manual vault does not visibly zoom inward at takeoff and back out at the
      landing frame. */
   const lowVaultFovActive=player.vaultKind==='low'&&
     (player.mode==='vault'||lowVaultCameraRecovery);
   const lowVaultFovBlend=lowVaultFovActive?Math.max(0,Math.min(1,
     (player.vaultEntrySpeed-PLAYER_WALK_SPEED)/
     Math.max(0.01,PLAYER_SPRINT_SPEED-PLAYER_WALK_SPEED))):0;
-  const baseFov=75+(sprinting?8:lowVaultFovBlend*8)+camFovKick+cameraSpeed*0.27;
+  const baseFov=75+Math.max(sprintCameraBlend,lowVaultFovBlend)*8+camFovKick;
   curFov+=(baseFov-curFov)*(1-Math.exp(-8*dt));
   if(camera.fov!==curFov){
     camera.fov=curFov;

@@ -1,5 +1,6 @@
 /* HUD feedback, particles, rockets, and explosion visuals. Loaded in order from index.html. */
 const hintEl=document.getElementById('hint');
+const hintProxyCandidates=[];
 let hintFlash='',hintTimer=0;
 function flashHint(msg,bad){
   hintFlash=msg;
@@ -18,9 +19,20 @@ function updateHint(dt){
   hintFwd.set(-Math.sin(camYaw),0,-Math.cos(camYaw));
   hintOrigin.set(player.pos.x,player.pos.y+1.3,player.pos.z);
   rc.set(hintOrigin,hintFwd);rc.far=2.4;rc.near=0.01;
-  const hits=rc.intersectObjects(allProxyMeshes,false);
+  hintProxyCandidates.length=0;
+  for(const mesh of getCameraOccluderCandidates(hintOrigin,hintFwd,2.4))
+    if(proxyByMesh.has(mesh))hintProxyCandidates.push(mesh);
+  const hits=rc.intersectObjects(hintProxyCandidates,false);
   let msg='';
-  if(hits.length){
+  let actionPrompt=false;
+  if(player.mode==='ground'){
+    lowVaultActionDir.copy(hintFwd);
+    if(canPromptLowVault(lowVaultActionDir)){
+      msg='VAULT';
+      actionPrompt=true;
+    }
+  }
+  if(!msg&&hits.length){
     const pr=proxyByMesh.get(hits[0].object);
     if(pr&&!pr.grip)msg='NO GRIP — polished surface';
     else if(player.mode==='ground')msg='HOLD SHIFT + W — climb';
@@ -29,12 +41,14 @@ function updateHint(dt){
     /* Show the same forgiving nearby-grip affordance used by tryGrab. This
        keeps the prompt useful on faceted surfaces where a single center ray is
        visually off a triangle even though the player can make a valid reach. */
-    const i=nearestReachableHold(hintOrigin,hintOrigin.y,2.7);
+    /* Prompts only need a nearby live grip. The exact hang/body sweep belongs
+       to the action itself; running it from this periodic HUD update validated
+       dozens of dense rock holds and could stall the entire render loop. */
+    const i=nearestHold(hintOrigin,hintOrigin.y,2.7);
     if(i>=0){
-      const h=HOLDS[i],dx=h.pos.x-hintOrigin.x,dz=h.pos.z-hintOrigin.z;
-      const flat=Math.hypot(dx,dz);
-      const facing=flat>0.1?(hintFwd.x*dx+hintFwd.z*dz)/flat:1;
-      msg=facing>0.18?'HOLD SHIFT + W — climb':'TURN TOWARD CLIMB SURFACE';
+      const h=HOLDS[i];
+      msg=cameraFacesClimbHold(h,hintOrigin)?
+        'HOLD SHIFT + W — climb':'TURN TOWARD CLIMB SURFACE';
     }
   }
   if(!msg&&player.mode==='hang'){
@@ -43,12 +57,13 @@ function updateHint(dt){
       const hasVault=h.vault&&h.vaultMesh&&surfaceObjectIsLive(h.vaultMesh);
       const hasUp=liveTraversalLinkCount(h,'up')>0;
       const hasSide=liveTraversalLinkCount(h,'side')>0;
-      msg=hasVault?'SPACE / SHIFT + W — vault over':
+      msg=hasVault?'VAULT':
         (hasUp?'SHIFT + W — climb higher':(hasSide?'A / D — traverse':'S — let go'));
+      actionPrompt=hasVault;
     }
   }
   hintEl.textContent=msg;
-  hintEl.className=msg.indexOf('NO GRIP')===0?'bad':'';
+  hintEl.className=msg.indexOf('NO GRIP')===0?'bad':(actionPrompt?'action':'');
 }
 
 function updateStatsUI(){

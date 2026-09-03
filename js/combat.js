@@ -10,8 +10,8 @@ const shotTargets=[];
 function collectShotTargets(){
   shotTargets.length=0;
   for(const mesh of occluders)shotTargets.push(mesh);
-  for(const e of enemies)if(e.alive)shotTargets.push(...e.voxelMeshes);
-  for(const d of dummies)if(d.alive)shotTargets.push(...d.voxelMeshes);
+  for(const e of enemies)if(e.alive)shotTargets.push(...actorTargetMeshes(e));
+  for(const d of dummies)if(d.alive)shotTargets.push(...actorTargetMeshes(d));
   shotTargets.push(ground);
   return shotTargets;
 }
@@ -295,11 +295,9 @@ function explode(epicenter){
     const dist=V().subVectors(e.pos,epicenter).length();
     if(dist>R)continue;
     const dmg=Math.round(120*(1-dist/R));
-    e.hp-=dmg;
-    if(e.hp<=0){
-      e.alive=false;
-      burstVoxelActor(e,epicenter,11*(1-dist/R)+4);
-      scene.remove(e.group);
+    const blastForce=11*(1-dist/R)+4;
+    const outcome=damageVoxelActorFromBlast(e,epicenter,dmg,blastForce);
+    if(outcome.killed){
       kills++;
     }else{
       const to=V().subVectors(e.pos,epicenter).normalize();
@@ -309,12 +307,10 @@ function explode(epicenter){
   for(const d of dummies){
     if(!d.alive)continue;
     const dist=d.pos.distanceTo(epicenter);if(dist>R)continue;
-    d.hp-=Math.round(100*(1-dist/R));
+    const dmg=Math.round(100*(1-dist/R));
+    const blastForce=10*(1-dist/R)+3.5;
     d.tilt=Math.min(1.5,d.tilt+0.8*(1-dist/R));
-    if(d.hp<=0){
-      d.alive=false;d.respawn=8;
-      burstVoxelActor(d,epicenter,10*(1-dist/R)+3.5);
-    }
+    damageVoxelActorFromBlast(d,epicenter,dmg,blastForce);
   }
   blastPlayerTarget.set(player.pos.x,player.pos.y+1.0,player.pos.z);
   const pDist=blastPlayerTarget.distanceTo(epicenter);
@@ -759,7 +755,15 @@ function spawnDebrisDust(point,intensity){
   }
 }
 
+function playerCanShoot(){
+  /* Traversal owns both hands and the weapon rig. Keep every firing path
+     disabled through wall attachment, transfers, hanging, the vault arc, and
+     the short landing pose; ordinary airborne ground-mode combat is allowed. */
+  return player.mode==='ground'&&player.vaultRecovery<=0;
+}
+
 function shoot(){
+  if(!playerCanShoot())return;
   const w=wpnStats();
   if(playerWpn.cooldown>0||playerWpn.reloading>0)return;
   playerWpn.cooldown=w.rof;
@@ -799,10 +803,11 @@ function shoot(){
     rc.set(start,dir);rc.far=SHOT_MAX_DISTANCE;rc.near=0.1;
     const hits=rc.intersectObjects(targets,false);
     const end=shotEnd.copy(start).addScaledVector(dir,SHOT_MAX_DISTANCE);
-    let hitTarget=null,hitKind=null,structuralTarget=null;
+    let hitTarget=null,hitKind=null,hitObject=null,structuralTarget=null;
     if(hits.length){
       end.copy(hits[0].point);
       const obj=hits[0].object;
+      hitObject=obj;
       for(const e of enemies){
         if(e.alive&&actorContainsMesh(e,obj)){hitTarget=e;hitKind='enemy';break;}
       }
@@ -834,24 +839,18 @@ function shoot(){
     if(hitTarget&&hitKind==='enemy'){
       Sfx.hit();
       showMarker();
-      hitTarget.hp-=w.dmg;
-      if(hitTarget.hp<=0){
-        hitTarget.alive=false;
+      const impactForce=w.name==='SHOTGUN'?4.2:(w.name==='RIFLE'?2.7:2.2);
+      const outcome=damageVoxelActor(hitTarget,hitObject,end,dir,w.dmg,impactForce);
+      if(outcome.killed){
         Sfx.kill();
-        burstVoxelActor(hitTarget,end,7.5);
-        scene.remove(hitTarget.group);
         makePickup('ammo',hitTarget.pos.x,hitTarget.pos.z);
         kills++;
       }
     }else if(hitTarget&&hitKind==='dummy'){
       Sfx.hit();
-      hitTarget.hp-=w.dmg;
       hitTarget.tilt=Math.min(1.5,hitTarget.tilt+0.4);
-      if(hitTarget.hp<=0){
-        hitTarget.alive=false;
-        hitTarget.respawn=8;
-        burstVoxelActor(hitTarget,end,6.5);
-      }
+      const impactForce=w.name==='SHOTGUN'?4:(w.name==='RIFLE'?2.5:2);
+      damageVoxelActor(hitTarget,hitObject,end,dir,w.dmg,impactForce);
     }else if(structuralTarget){
       damageStructureFromBullet(structuralTarget,hits[0].object,end,dir,w,
         hits[0].face?wn(hits[0],hits[0].object,worldNormalScratch):UP);

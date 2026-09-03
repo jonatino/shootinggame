@@ -153,7 +153,13 @@ const cameraRayEnd=V(),cameraRayMin=V(),cameraRayMax=V();
 let cameraOccluderGridDirty=true,cameraOccluderQueryStamp=0;
 function isCameraDynamicOccluder(mesh){
   const ud=mesh&&mesh.userData;
-  return !!(ud&&(ud.kind==='cell'||ud.cameraFade||ud.staticFragment||ud.sleeping));
+  /* An intact voxel field is large, but it is not dynamic. Treating every
+     fadeable field as moving appended every building to every camera and
+     traversal ray, so standing beside one rock still raycast all 35k world
+     voxels. Moving/fallen pieces keep the dynamic path below. */
+  return !!(ud&&ud.kind!=='voxelField'&&
+    (ud.kind==='cell'||ud.kind==='voxelChunk'||ud.cameraFade||
+     ud.staticFragment||ud.sleeping));
 }
 function cameraOccluderGridKey(x,z){return x+'_'+z;}
 function addOccluder(mesh){
@@ -178,7 +184,16 @@ function rebuildCameraOccluderGrid(){
   cameraOccluderGridLarge.length=0;
   for(const mesh of occluders){
     if(!mesh||isCameraDynamicOccluder(mesh))continue;
-    const bounds=box3Of(mesh);
+    const ud=mesh.userData,st=ud&&ud.voxelStructure;
+    /* Box3.setFromObject cannot see an InstancedMesh's per-instance offsets in
+       this Three.js version. Use the voxel field's authored world bounds so a
+       static field is indexed across its real footprint instead of one unit
+       around its origin. */
+    const bounds=st?new THREE.Box3(
+      st.origin.clone(),
+      V(st.origin.x+st.nx*st.sx,st.origin.y+st.ny*st.sy,
+        st.origin.z+st.nz*st.sz)
+    ):box3Of(mesh);
     const minX=Math.floor(bounds.min.x/CAMERA_OCCLUDER_GRID_CELL);
     const maxX=Math.floor(bounds.max.x/CAMERA_OCCLUDER_GRID_CELL);
     const minZ=Math.floor(bounds.min.z/CAMERA_OCCLUDER_GRID_CELL);
@@ -206,8 +221,15 @@ function getCameraOccluderCandidates(origin,dir,far){
   const maxX=Math.floor((Math.max(origin.x,cameraRayEnd.x)+margin)/CAMERA_OCCLUDER_GRID_CELL);
   const minZ=Math.floor((Math.min(origin.z,cameraRayEnd.z)-margin)/CAMERA_OCCLUDER_GRID_CELL);
   const maxZ=Math.floor((Math.max(origin.z,cameraRayEnd.z)+margin)/CAMERA_OCCLUDER_GRID_CELL);
+  cameraRayMin.set(Math.min(origin.x,cameraRayEnd.x)-margin,0,
+    Math.min(origin.z,cameraRayEnd.z)-margin);
+  cameraRayMax.set(Math.max(origin.x,cameraRayEnd.x)+margin,0,
+    Math.max(origin.z,cameraRayEnd.z)+margin);
   const appendEntry=entry=>{
     if(!entry||entry._cameraQueryStamp===stamp)return;
+    const bounds=entry.bounds;
+    if(bounds&&(bounds.max.x<cameraRayMin.x||bounds.min.x>cameraRayMax.x||
+       bounds.max.z<cameraRayMin.z||bounds.min.z>cameraRayMax.z))return;
     entry._cameraQueryStamp=stamp;
     cameraOccluderGridCandidates.push(entry.mesh);
   };
@@ -219,8 +241,6 @@ function getCameraOccluderCandidates(origin,dir,far){
   /* Active and settled chunks move or rotate, so their broadphase entries are
      numeric bounds refreshed by the rigid solver. Query their XZ overlap here
      rather than rebuilding the static mesh hash on every physics step. */
-  cameraRayMin.set(Math.min(origin.x,cameraRayEnd.x)-margin,0,Math.min(origin.z,cameraRayEnd.z)-margin);
-  cameraRayMax.set(Math.max(origin.x,cameraRayEnd.x)+margin,0,Math.max(origin.z,cameraRayEnd.z)+margin);
   for(const mesh of cameraDynamicOccluders){
     const ud=mesh&&mesh.userData;
     if(!ud)continue;

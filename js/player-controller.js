@@ -2,6 +2,7 @@
 const player={pos:V(8,0,16),vel:V(),mode:'ground',hold:-1,
   moveFrom:-1,moveTo:-1,attachT:0,moveDuration:0.36,attachFrom:V(),
   vaultFrom:V(),vaultTo:V(),vaultNormal:V(),vaultT:0,vaultDuration:0.68,vaultClearance:0.72,vaultPush:0.42,
+  vaultForwardStart:0,
   vaultLandingNormal:V(0,1,0),vaultContactNormal:V(0,1,0),
   vaultKind:'none',vaultObstacle:null,vaultLandingMesh:null,
   vaultContactPoint:V(),vaultDirection:V(0,0,1),
@@ -9,7 +10,7 @@ const player={pos:V(8,0,16),vel:V(),mode:'ground',hold:-1,
   vaultLeadLeft:true,
   vaultRecovery:0,vaultRecoveryDuration:0.28,
   landingSurface:null,landingAnchor:V(),landingY:0,landingRadius:1.35,
-  climbBuffer:0,climbDir:V(),
+  climbBuffer:0,climbDir:V(),jumpClimbActive:false,jumpLaunchY:0,
   cool:0,grace:0,jumpGrace:0,jumpBuffer:0,onGround:true,heading:Math.PI,
   hp:100};
 const playerCollisionBefore=V(),playerCollisionCorrection=V(),playerCollisionNormal=V();
@@ -22,6 +23,7 @@ const PLAYER_STEP_HEIGHT=0.42,PLAYER_STEP_MIN_RISE=0.035;
    silhouette without changing the player's aim direction. */
 let camYaw=0.72,camPitch=0.27,camShake=0;
 let targetYaw=camYaw,targetPitch=camPitch,camRoll=0,curFov=75,bobPhase=0;
+const CAMERA_PITCH_MIN=-0.42,CAMERA_PITCH_MAX=1.25;
 let camRollTarget=0,camBobAmt=0,sprinting=false,camPitchKick=0,camYawKick=0,camFovKick=0;
 let moveSpeed=0,camZoom=1,heldDist=5.6;
 /* Fire-rate cooldown and physical recoil are separate signals. Cooldown says
@@ -36,14 +38,18 @@ const weaponRecoilProfiles={
 };
 let weaponRecoilKick=0,weaponRecoilPitch=0,weaponRecoilRoll=0;
 /* reusable vectors to avoid per-frame allocation in updateCam */
-const camTmp1=V(),camTmp2=V(),camTmp3=V(),camAltDir=V(),camBestDir=V();
-const camClimbNormal=V(),camClimbSide=V();
-const cameraOrbitOffsets=[Math.PI*0.5,-Math.PI*0.5,Math.PI*0.34,-Math.PI*0.34,Math.PI*0.75,-Math.PI*0.75];
+const camTmp1=V(),camTmp2=V(),camTmp3=V();
 const moveFwd=V(),moveRight=V(),moveDir=V(),camMoveFwd=V(),camMoveRight=V(),hintOrigin=V(),hintFwd=V();
+const climbCameraForward=V(),climbCameraToHold=V(),climbCameraSurface=V();
+const pickSideAxis=V(),pickSideDelta=V();
 const movementAccelWorld=V();
 let climbPhase=0,climbStepParity=0,landingKick=0,walkPhase=0,walkAmt=0,heading=Math.PI;
 let weaponSprint=0,movementAccel=0;
 let started=false;
+/* game-loop replaces these no-op hooks after every classic script has loaded.
+   Keeping the hooks here lets the input module remain usable in the CPU test
+   harness, which intentionally does not load the renderer loop. */
+let resumeGameLoop=()=>{},suspendGameLoop=()=>{};
 let mouseHeld=false;
 let mouseLookReady=false,lastMouseX=0,lastMouseY=0;
 const MOUSE_SENSITIVITY=0.0026;
@@ -53,17 +59,19 @@ let climbIntentUntil=0;
 let shiftIntentUntil=0;
 let dropIntentUntil=0,spaceIntentUntil=0;
 let vaultIntentUntil=0;
+let climbDownIntentUntil=0;
 const movementIntentDir=V();
 let movementIntentUntil=0;
+let movementInputSampled=false;
 /* Preserve very short taps across a slow input/render boundary. Keep this
    brief: at the higher combat speeds, a longer grace period feels like ice. */
 const MOVEMENT_INTENT_WINDOW=0.12;
 
 const keys={};
 const inputKeyAliases={
-  w:'KeyW',a:'KeyA',s:'KeyS',d:'KeyD',
-  W:'KeyW',A:'KeyA',S:'KeyS',D:'KeyD',
-  KEYW:'KeyW',KEYA:'KeyA',KEYS:'KeyS',KEYD:'KeyD',
+  w:'KeyW',a:'KeyA',s:'KeyS',d:'KeyD',c:'KeyC',
+  W:'KeyW',A:'KeyA',S:'KeyS',D:'KeyD',C:'KeyC',
+  KEYW:'KeyW',KEYA:'KeyA',KEYS:'KeyS',KEYD:'KeyD',KEYC:'KeyC',
   Shift:'ShiftLeft',ShiftLeft:'ShiftLeft',ShiftRight:'ShiftRight',
   SHIFT:'ShiftLeft',SHIFTLEFT:'ShiftLeft',SHIFTRIGHT:'ShiftRight',
   Space:'Space',SPACE:'Space',' ':'Space'
@@ -73,13 +81,14 @@ function normalizedInputCode(e){
 }
 addEventListener('keydown',e=>{
   const code=normalizedInputCode(e);
+  if(!started)return;
   keys[code]=true;
   if(code==='Space')e.preventDefault();
-  if(!started)return;
   const inputNow=performance.now();
   const shiftCode=code==='ShiftLeft'||code==='ShiftRight';
   if(shiftCode)shiftIntentUntil=inputNow+0.28*1000;
   if(code==='KeyS')dropIntentUntil=inputNow+0.3*1000;
+  if(code==='KeyC'&&!e.repeat)climbDownIntentUntil=inputNow+0.42*1000;
   if(code==='Space'){
     dropIntentUntil=inputNow+0.3*1000;spaceIntentUntil=inputNow+0.3*1000;
     if(player.mode==='hang')vaultIntentUntil=inputNow+0.34*1000;
@@ -110,6 +119,7 @@ addEventListener('keydown',e=>{
     }
   }
   if(code==='KeyW'||code==='KeyA'||code==='KeyS'||code==='KeyD'){
+    if(!e.repeat)movementInputSampled=false;
     const ix=(keys.KeyD?1:0)-(keys.KeyA?1:0);
     const iz=(keys.KeyW?1:0)-(keys.KeyS?1:0);
     const fwdX=-Math.sin(camYaw),fwdZ=-Math.cos(camYaw);
@@ -123,7 +133,7 @@ addEventListener('keydown',e=>{
   if(code==='KeyS'||code==='Space')climbIntentUntil=0;
   if(code==='Space')movementIntentUntil=0;
   if(code==='KeyM'&&!e.repeat)Sfx.toggle();
-  if(code==='Space')player.jumpBuffer=0.14;
+  if(code==='Space'&&!e.repeat)player.jumpBuffer=0.14;
   if(code==='Digit1')setWeapon('pistol');
   if(code==='Digit2')setWeapon('rifle');
   if(code==='Digit3')setWeapon('shotgun');
@@ -135,8 +145,14 @@ addEventListener('keyup',e=>{
   keys[code]=false;
   if((code==='KeyW'||code==='KeyA'||code==='KeyS'||code==='KeyD')&&
      !keys.KeyW&&!keys.KeyA&&!keys.KeyS&&!keys.KeyD){
-    movementIntentUntil=0;
-    movementIntentDir.set(0,0,0);
+    /* Keep a tap that arrived entirely between physics samples alive for the
+       short intent window. Once live input has reached a simulation frame,
+       release it immediately so normal held movement never gains an icy tail. */
+    if(movementInputSampled){
+      movementIntentUntil=0;
+      movementIntentDir.set(0,0,0);
+    }
+    movementInputSampled=false;
   }
 });
 addEventListener('mousedown',e=>{
@@ -144,26 +160,40 @@ addEventListener('mousedown',e=>{
   if(e.button===0){mouseHeld=true;shoot();}
 });
 addEventListener('mouseup',e=>{if(e.button===0)mouseHeld=false;});
-addEventListener('blur',()=>{
+const startScreen=document.getElementById('start');
+function clearGameInput(){
   mouseHeld=false;mouseLookReady=false;climbIntentUntil=0;shiftIntentUntil=0;
   dropIntentUntil=0;spaceIntentUntil=0;vaultIntentUntil=0;
+  climbDownIntentUntil=0;
   climbIntentDir.set(0,0,0);
-  movementIntentUntil=0;movementIntentDir.set(0,0,0);
+  movementIntentUntil=0;movementIntentDir.set(0,0,0);movementInputSampled=false;
   for(const code in keys)keys[code]=false;
+}
+function pauseForFocusLoss(){
+  clearGameInput();
+  started=false;
+  suspendGameLoop();
+  startScreen.style.display='flex';
+  if(document.pointerLockElement&&document.exitPointerLock){
+    try{document.exitPointerLock();}catch(_){}
+  }
+}
+addEventListener('blur',pauseForFocusLoss);
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden)pauseForFocusLoss();
 });
 function applyMouseLookDelta(dx,dy){
-  /* Apply physical mouse travel directly to both the live camera and its
-     scripted target. Updating only the target made updateCam ease toward the
-     input for several frames, which felt like acceleration on fast turns and
-     kept drifting after the mouse stopped. Scripted mantle camera moves can
-     still use targetYaw and retain their deliberate easing. */
+  /* Mouse travel is the sole owner of camera yaw and pitch. Apply it to both
+     live and target angles so the view never accelerates, drifts, or inherits
+     a traversal-authored direction after the user stops moving the mouse. */
   const yawDelta=-dx*MOUSE_SENSITIVITY;
   targetYaw+=yawDelta;
   camYaw+=yawDelta;
-  const nextPitch=Math.max(-0.1,Math.min(1.25,targetPitch+dy*MOUSE_SENSITIVITY));
+  const nextPitch=Math.max(CAMERA_PITCH_MIN,
+    Math.min(CAMERA_PITCH_MAX,targetPitch+dy*MOUSE_SENSITIVITY));
   const pitchDelta=nextPitch-targetPitch;
   targetPitch=nextPitch;
-  camPitch=Math.max(-0.1,Math.min(1.25,camPitch+pitchDelta));
+  camPitch=Math.max(CAMERA_PITCH_MIN,Math.min(CAMERA_PITCH_MAX,camPitch+pitchDelta));
 }
 addEventListener('mousemove',e=>{
   if(!started)return;
@@ -201,16 +231,29 @@ function requestGamePointerLock(){
   }
 }
 addEventListener('pointerlockchange',()=>{mouseLookReady=false;});
-renderer.domElement.addEventListener('click',requestGamePointerLock);
-document.getElementById('start').addEventListener('mousedown',e=>e.stopPropagation());
-document.getElementById('start').addEventListener('click',()=>{
+renderer.domElement.addEventListener('click',()=>{
+  if(started)requestGamePointerLock();
+});
+startScreen.addEventListener('mousedown',e=>{
+  e.preventDefault();
+  e.stopPropagation();
+  if(e.button!==0)return;
   Sfx.init();
   mouseLookReady=false;
   fireBlockUntil=performance.now()+250;
+  started=true;
+  startScreen.style.display='none';
+  resumeGameLoop();
   requestGamePointerLock();
-  document.getElementById('start').style.display='none';
 });
-addEventListener('wheel',e=>{camZoom=Math.max(0.65,Math.min(1.7,camZoom+(e.deltaY>0?0.1:-0.1)));},{passive:true});
+startScreen.addEventListener('contextmenu',e=>{
+  e.preventDefault();
+  e.stopPropagation();
+});
+addEventListener('wheel',e=>{
+  if(!started)return;
+  camZoom=Math.max(0.65,Math.min(1.7,camZoom+(e.deltaY>0?0.1:-0.1)));
+},{passive:true});
 
 function tryPickup(){
   for(const p of pickups){
@@ -233,14 +276,35 @@ function tryPickup(){
   }
 }
 
+const groundStaticProbe=V(),groundStandableCandidates=[];
 function groundBelow(x,z,fromY,limitY){
+  let best=0;
+  /* Voxel fields already expose exact axis-aligned physics boxes in the static
+     grid. Reading the handful beneath this point avoids asking Three.js to
+     raycast every instance in every building once (and three times on a step
+     collision). */
+  groundStaticProbe.set(x,fromY,z);
+  for(const box of getStaticBoxCandidatesAt(groundStaticProbe,0.05)){
+    if(box.active===false||!box.voxelStructure)continue;
+    if(x<box.min.x||x>box.max.x||z<box.min.z||z>box.max.z)continue;
+    const top=box.max.y;
+    if(top<=fromY+0.31&&(limitY===undefined||top<=limitY)&&top>best)best=top;
+  }
   groundProbeOrigin.set(x,fromY+0.3,z);
-  rc.set(groundProbeOrigin,DOWN);rc.far=fromY+0.35;rc.near=0.001;
-  const hits=rc.intersectObjects(standables,false);
-  for(let i=0;i<hits.length;i++)
-    if(hits[i].point.y<=fromY+0.31&&
-       (limitY===undefined||hits[i].point.y<=limitY))return hits[i].point.y;
-  return 0;
+  rc.set(groundProbeOrigin,DOWN);rc.far=Math.max(0.001,fromY+0.35);rc.near=0.001;
+  groundStandableCandidates.length=0;
+  for(const mesh of nearbyStandables(groundProbeOrigin,DOWN,rc.far)){
+    /* Static voxel fields were handled exactly above. Dynamic chunks and all
+       conventional meshes still use their real triangles. */
+    if(mesh&&mesh.userData&&mesh.userData.kind==='voxelField')continue;
+    groundStandableCandidates.push(mesh);
+  }
+  const hits=rc.intersectObjects(groundStandableCandidates,false);
+  for(let i=0;i<hits.length;i++){
+    const y=hits[i].point.y;
+    if(y<=fromY+0.31&&(limitY===undefined||y<=limitY)&&y>best)best=y;
+  }
+  return best;
 }
 
 const playerObbAxes=[V(),V(),V()],playerObbHalf=V();
@@ -632,139 +696,165 @@ function resolveCameraPosition(pos,ignore){
 
 function nearestHold(p,chestY,maxD,mesh){
   let best=-1,bd=maxD;
-  for(let i=0;i<HOLDS.length;i++){
-    if(mesh&&HOLDS[i].mesh!==mesh)continue;
-    if(!holdSurfaceIsLive(HOLDS[i]))continue;
-    const d=HOLDS[i].pos.distanceTo(p)+Math.abs(HOLDS[i].pos.y-chestY)*0.4;
+  for(const i of nearbyClimbHoldIndices(p,maxD,mesh)){
+    const h=HOLDS[i];
+    if(!holdSurfaceIsLive(h))continue;
+    const d=h.pos.distanceTo(p)+Math.abs(h.pos.y-chestY)*0.4;
     if(d<bd){bd=d;best=i;}
   }
   return best;
 }
 
-function nearestReachableHold(p,chestY,maxD,mesh){
-  let best=-1,bd=maxD;
-  for(let i=0;i<HOLDS.length;i++){
-    if(mesh&&HOLDS[i].mesh!==mesh)continue;
-    if(!holdSurfaceIsLive(HOLDS[i]))continue;
-    const d=HOLDS[i].pos.distanceTo(p)+Math.abs(HOLDS[i].pos.y-chestY)*0.4;
-    if(d>=bd)continue;
-    /* Select against the actual hang root and two-bone arm length, not just
-       the graph point distance. A dense pole/facade can contain a closer
-       sample that is too high or too far around the edge; skipping that one
-       lets the next valid handhold win instead of reporting a false failure. */
-    hangPos(i,climbPathToPos);
-    if(!climbPoseReachable(i,climbPathToPos))continue;
-    bd=d;best=i;
+/* At contact distance a voxel face centre can sit half a cell to one side of
+   the camera ray even though the face itself is directly ahead. Keep a modest
+   forward cone here; the stricter surface-normal test below still prevents a
+   grab around the back of an edge. */
+const CLIMB_CAMERA_HOLD_DOT=0.62;
+const CLIMB_CAMERA_SURFACE_DOT=0.68;
+function cameraFacesClimbHold(h,origin){
+  if(!h)return false;
+  origin=origin||player.pos;
+  climbCameraForward.set(-Math.sin(camYaw),0,-Math.cos(camYaw));
+  climbCameraToHold.set(h.pos.x-origin.x,0,h.pos.z-origin.z);
+  const flat=climbCameraToHold.length();
+  if(flat>0.12){
+    climbCameraToHold.multiplyScalar(1/flat);
+    if(climbCameraForward.dot(climbCameraToHold)<CLIMB_CAMERA_HOLD_DOT)return false;
   }
-  return best;
+  climbCameraSurface.copy(h.out).setY(0);
+  if(climbCameraSurface.lengthSq()<0.04)return false;
+  climbCameraSurface.normalize();
+  return climbCameraForward.dot(climbCameraSurface)<=-CLIMB_CAMERA_SURFACE_DOT;
 }
 
-function tryGrab(dir,air){
+const CLIMB_GRAB_EXACT_BUDGET=4;
+const CLIMB_GRAB_RETRY_MS=100;
+const climbGrabCandidateScores=new Map(),climbGrabCandidateIndices=[];
+const climbGrabRayMeshesSeen=new Set(),climbGrabProxyCandidates=[];
+let climbGrabRetryAt=0;
+function queueClimbGrabCandidate(index,score){
+  const previous=climbGrabCandidateScores.get(index);
+  if(previous!==undefined){
+    if(score<previous)climbGrabCandidateScores.set(index,score);
+    return;
+  }
+  climbGrabCandidateScores.set(index,score);
+  climbGrabCandidateIndices.push(index);
+}
+
+function tryGrab(air,allowDescent=false){
   if(player.cool>0||player.grace>0)return;
+  const grabNow=performance.now();
+  if(grabNow<climbGrabRetryAt)return;
+  climbCameraForward.set(-Math.sin(camYaw),0,-Math.cos(camYaw));
   climbGrabOrigin.set(player.pos.x,player.pos.y+1.25,player.pos.z);
-  climbGrabSide.crossVectors(UP,dir);
+  climbGrabSide.crossVectors(UP,climbCameraForward);
   if(climbGrabSide.lengthSq()<0.001)climbGrabSide.set(1,0,0);
   else climbGrabSide.normalize();
   let polished=false;
   let gripHit=false,linkedHold=false,reachRejected=false;
-  let blocked=false,bestHold=-1,bestDistance=Infinity;
-  /* A small lateral fan makes grabbing tolerant of a shoulder-width approach
-     while still using the same exact proxy surface and clearance tests. The
-     old single center ray often hit a corner or missed a ledge by a few
-     centimeters, then left the player in an awkward half-attached pose. */
-  for(let fan=0;fan<3;fan++){
-    const offset=fan===0?-0.22:(fan===1?0:0.22);
-    climbGrabOrigin.set(player.pos.x,player.pos.y+1.25,player.pos.z)
-      .addScaledVector(climbGrabSide,offset);
-    climbGrabRay.copy(dir).addScaledVector(climbGrabSide,offset*0.12).normalize();
-    rc.set(climbGrabOrigin,climbGrabRay);rc.far=air?2.1:1.6;rc.near=0.01;
-    const hits=rc.intersectObjects(allProxyMeshes,false);
-    for(const hit of hits){
-      const pr=proxyByMesh.get(hit.object);
-      if(!pr)continue;
-      if(!pr.grip){polished=true;continue;}
-      gripHit=true;
-      const i=nearestReachableHold(hit.point,climbGrabOrigin.y,3.0,hit.object);
-      if(i<0)continue;
-      linkedHold=true;
-      /* Do not enter a hang when the ground or a nearby platform leaves less
-         than one arm-span between the candidate root and the grip. The old
-         grab accepted those low side samples, then the collision solver kept
-         the hips on the floor while both arms tried to reach through the
-         chest. */
-      hangPos(i,climbPathToPos);
-      if(!climbPoseReachable(i,climbPathToPos)){
-        reachRejected=true;
-        continue;
+  let blocked=false,bestHold=-1;
+  climbGrabCandidateScores.clear();
+  climbGrabCandidateIndices.length=0;
+  climbGrabRayMeshesSeen.clear();
+  /* The hold hash is already the most selective broadphase. Prefer it before
+     any triangle ray: voxel-rock holds are exact physical faces, and scanning
+     a 2,000-instance rock merely to rediscover those nearby nodes caused the
+     contact hitch this query is meant to prevent. */
+  climbGrabOrigin.set(player.pos.x,player.pos.y+1.25,player.pos.z);
+  const candidateReach=air?2.45:2.05;
+  for(const i of nearbyClimbHoldIndices(climbGrabOrigin,candidateReach)){
+    const h=HOLDS[i];
+    if(!holdSurfaceIsLive(h))continue;
+    climbGrabCandidate.subVectors(h.pos,climbGrabOrigin);
+    const vertical=climbGrabCandidate.y;
+    const flat=Math.hypot(climbGrabCandidate.x,climbGrabCandidate.z);
+    const distance=Math.hypot(flat,vertical);
+    if(distance>candidateReach||flat<0.18||vertical<-1.65||vertical>1.8)continue;
+    climbGrabCandidateDir.set(climbGrabCandidate.x,0,climbGrabCandidate.z).normalize();
+    const facing=climbCameraForward.dot(climbGrabCandidateDir);
+    if(facing<CLIMB_CAMERA_HOLD_DOT||
+       !cameraFacesClimbHold(h,climbGrabOrigin))continue;
+    gripHit=true;linkedHold=true;
+    queueClimbGrabCandidate(i,distance+(1-facing)*0.8+Math.abs(vertical)*0.16);
+  }
+  if(!climbGrabCandidateIndices.length){
+    /* Sparse and polished surfaces still need an exact hit for useful feedback.
+       Restrict the shoulder fan to proxy meshes in this short ray corridor;
+       hidden fracture proxies with nearby holds were already handled above. */
+    for(let fan=0;fan<3;fan++){
+      const offset=fan===0?-0.22:(fan===1?0:0.22);
+      climbGrabOrigin.set(player.pos.x,player.pos.y+1.25,player.pos.z)
+        .addScaledVector(climbGrabSide,offset);
+      climbGrabRay.copy(climbCameraForward).addScaledVector(climbGrabSide,offset*0.12).normalize();
+      rc.set(climbGrabOrigin,climbGrabRay);rc.far=air?2.1:1.6;rc.near=0.01;
+      climbGrabProxyCandidates.length=0;
+      for(const mesh of getCameraOccluderCandidates(climbGrabOrigin,climbGrabRay,rc.far))
+        if(proxyByMesh.has(mesh))climbGrabProxyCandidates.push(mesh);
+      const hits=rc.intersectObjects(climbGrabProxyCandidates,false);
+      for(const hit of hits){
+        const pr=proxyByMesh.get(hit.object);
+        if(!pr)continue;
+        if(!pr.grip){polished=true;continue;}
+        gripHit=true;
+        if(climbGrabRayMeshesSeen.has(hit.object))continue;
+        climbGrabRayMeshesSeen.add(hit.object);
+        for(const i of nearbyClimbHoldIndices(hit.point,3.0,hit.object)){
+          const h=HOLDS[i];
+          if(!holdSurfaceIsLive(h)||!cameraFacesClimbHold(h,climbGrabOrigin))continue;
+          const distance=h.pos.distanceTo(hit.point)+Math.abs(h.pos.y-climbGrabOrigin.y)*0.4;
+          if(distance>=3.0)continue;
+          linkedHold=true;
+          queueClimbGrabCandidate(i,hit.distance+distance*0.12+0.18);
+        }
       }
-      if(!climbAttachClearance(HOLDS[i],player.pos,climbPathToPos)){
-        blocked=true;
-        continue;
-      }
-      if(hit.distance<bestDistance){bestDistance=hit.distance;bestHold=i;}
-      break;
     }
   }
-  if(bestHold<0){
-    /* The fan ray is the precise path, but a faceted proxy can still leave a
-       one-frame gap between the player's approach vector and the nearest hand
-       node. Offer a small proximity assist only when the candidate is in front
-       of the player, the wall normal faces the approach, and a second ray can
-       confirm a nearby grip. Reach and swept clearance below remain the final
-       authority, so this cannot pull the body through a corner. */
-    const candidateReach=air?2.85:2.55;
-    let fallbackScore=Infinity;
-    for(let i=0;i<HOLDS.length;i++){
-      const h=HOLDS[i];
-      if(!holdSurfaceIsLive(h))continue;
-      climbGrabCandidate.subVectors(h.pos,climbGrabOrigin);
-      const vertical=climbGrabCandidate.y;
-      const flat=Math.hypot(climbGrabCandidate.x,climbGrabCandidate.z);
-      const distance=Math.hypot(flat,vertical);
-      if(distance>candidateReach||flat<0.18||vertical<-1.65||vertical>1.8)continue;
-      climbGrabCandidateDir.set(climbGrabCandidate.x,0,climbGrabCandidate.z).normalize();
-      const facing=dir.dot(climbGrabCandidateDir);
-      if(facing<0.22)continue;
-      hangPos(i,climbPathToPos);
-      if(!climbPoseReachable(i,climbPathToPos)){
-        reachRejected=true;
-        continue;
-      }
-      rc.set(climbGrabOrigin,climbGrabCandidateDir);
-      rc.far=Math.min(2.8,flat+0.42);rc.near=0.01;
-      const sight=rc.intersectObjects(allProxyMeshes,false);
-      let visibleGrip=false;
-      for(const hit of sight){
-        const pr=proxyByMesh.get(hit.object);
-        if(pr&&pr.grip)visibleGrip=true;
-        if(visibleGrip)break;
-      }
-      /* A hand node is already authored on the climb surface. If the proxy ray
-         misses its tiny triangle at a grazing angle, the swept attach test is a
-         better obstruction check than rejecting the nearby grip outright. */
-      const score=distance+(1-facing)*0.8+Math.abs(vertical)*0.16+
-        (visibleGrip?0:0.18);
-      if(score<fallbackScore){fallbackScore=score;bestHold=i;bestDistance=distance;}
+  climbGrabCandidateIndices.sort((a,b)=>
+    climbGrabCandidateScores.get(a)-climbGrabCandidateScores.get(b));
+  let exactChecks=0;
+  for(const i of climbGrabCandidateIndices){
+    const h=HOLDS[i];
+    /* Do not enter a hang when the ground or a nearby platform leaves less
+       than one arm-span between the candidate root and the grip. */
+    hangPos(i,climbPathToPos);
+    /* Normal Shift+W is ascent-only. A roof runner can pass within reach of a
+       lower hold after leaving the edge; accepting that hold here is what
+       pulled the player back toward the building. Only the dedicated descent
+       action may choose a hang root below the current feet. */
+    if(!allowDescent&&climbPathToPos.y<player.pos.y-(air?0:0.08))continue;
+    if(!climbPoseReachable(i,climbPathToPos)){
+      reachRejected=true;
+      continue;
     }
-    if(bestHold>=0){
-      hangPos(bestHold,climbPathToPos);
-      if(!climbPoseReachable(bestHold,climbPathToPos)){
-        reachRejected=true;bestHold=-1;
-      }else if(!climbAttachClearance(HOLDS[bestHold],player.pos,climbPathToPos)){
-        blocked=true;bestHold=-1;
-      }
+    /* Cheap direction/reach rejection must not consume the swept-clearance
+       budget. From atop a prop, several closer holds can be below the player's
+       feet; counting those used to hide the valid airborne-level hold above. */
+    if(exactChecks++>=CLIMB_GRAB_EXACT_BUDGET)break;
+    if(!climbAttachClearance(h,player.pos,climbPathToPos)){
+      blocked=true;
+      continue;
     }
+    bestHold=i;
+    break;
   }
   if(bestHold>=0){
-    hangPos(bestHold,climbPathToPos);
+    if(allowDescent)climbDownIntentUntil=0;
+    climbGrabRetryAt=0;
     player.landingSurface=null;
     player.onGround=false;
+    player.jumpClimbActive=false;
     player.mode='attach';player.moveTo=bestHold;
     player.attachFrom.copy(player.pos);player.attachT=0;
     climbPhase=0;climbStepParity=0;
     player.vel.set(0,0,0);
     return;
   }
+  /* Failed exact checks are stable for several frames while the capsule is
+     pressed against the same face. A short retry interval prevents held
+     Shift+W from rerunning the expensive rock sweep at render frequency, yet
+     still reacts promptly when the player slides to a new hold. */
+  climbGrabRetryAt=grabNow+CLIMB_GRAB_RETRY_MS;
   if(blocked)flashHint('CLIMB BLOCKED — clear the approach',true);
   else if(polished)flashHint('NO GRIP — polished surface',true);
   else if(reachRejected)flashHint('HANDHOLD OUT OF REACH',true);
@@ -785,6 +875,15 @@ function hangPos(i,out){
      level-with-the-hold mannequin pose. The outward gap keeps the backpack and
      hips clear of thin ledges while the hands remain close to the surface. */
   out.copy(climbSurfacePoint).addScaledVector(UP,-2.05).addScaledVector(climbSurfaceNormal,CLIMB_ROOT_OFFSET);
+  if(h.voxelSurface){
+    /* A voxel rock tapers as a staircase. Local top faces belong to the wall
+       being traversed, not to the floor under a hanging pose; clamping onto
+       each terrace lifts the shoulders above their hands and makes the next
+       tier unreachable. Only the authored world floor limits the first hold. */
+    out.y=Math.max(0,out.y);
+    keepClimbBodyClear(out,h);
+    return out;
+  }
   let gh=0;
   /* A vertical climb can pass over the crown of a rock or a ledge. The old
      unconditional ground clamp treated that surface as a floor and lifted
@@ -862,14 +961,16 @@ const vaultPathNormal=V(),vaultPathSample=V(),vaultTargetExpected=V();
 const vaultTargetFlat=V(),vaultTargetSide=V();
 const vaultDesiredPos=V(),vaultMotionFrom=V(),vaultMotionDelta=V();
 const vaultExitVelocity=V();
-const lowVaultForward=V(),lowVaultProbeOrigin=V(),lowVaultProbePoint=V();
+const lowVaultForward=V(),lowVaultProbeSide=V(),lowVaultProbeOrigin=V(),lowVaultProbePoint=V();
 const lowVaultProbeNormal=V(0,1,0),lowVaultFrontPoint=V(),lowVaultTopPoint=V();
 const lowVaultTopNormal=V(0,1,0),lowVaultLandingPoint=V(),lowVaultLandingNormal=V(0,1,0);
 let lowVaultProbeMesh=null;
-const AUTO_VAULT_MIN_HEIGHT=PLAYER_STEP_HEIGHT+0.055;
-const AUTO_VAULT_MAX_HEIGHT=1.32;
-const AUTO_VAULT_MAX_DEPTH=1.55;
-const AUTO_VAULT_DEPTH_STEP=0.12;
+const LOW_VAULT_MIN_HEIGHT=PLAYER_STEP_HEIGHT+0.055;
+const LOW_VAULT_MAX_HEIGHT=1.32;
+const LOW_VAULT_MAX_DEPTH=1.55;
+const LOW_VAULT_DEPTH_STEP=0.12;
+const LOW_VAULT_PROBE_SIDE_OFFSETS=[0,0.055,-0.055,0.11,-0.11];
+const lowVaultActionDir=V();
 const climbDesiredPos=V(),climbMotionFrom=V(),climbMotionDelta=V();
 const climbGrabOrigin=V(),climbGrabSide=V(),climbGrabRay=V(),climbGrabCandidate=V(),climbGrabCandidateDir=V();
 function holdSurfaceRoot(h){
@@ -939,8 +1040,26 @@ function climbBodySurfaceMeshes(h){
 function keepClimbBodyClear(pos,h){
   const root=holdSurfaceRoot(h);
   if(!root||!root.parent||!root.geometry)return pos;
-  const targets=climbBodySurfaceMeshes(h);
   holdSurfaceAnchor(h,climbSurfacePoint,climbSurfaceNormal);
+  const rootData=root.userData;
+  if(h.voxelSurface&&rootData&&rootData.kind==='voxelField'){
+    /* During traversal this field is already excluded from capsule collision.
+       Enforce the contacted face plane, not every lower terrace in the same
+       rock. Resolving the full vertical capsule against a protruding step
+       pushes the hips outward while the hands target the recessed next tier,
+       creating an impossible arm span at every taper. The transfer's outward
+       arc carries the lower body over that step; unrelated geometry remains
+       fully collision-tested by resolveColliders. */
+    climbBodyNormal.copy(climbSurfaceNormal).setY(0);
+    if(climbBodyNormal.lengthSq()>0.04){
+      climbBodyNormal.normalize();
+      climbBodyCorrection.subVectors(pos,climbSurfacePoint);
+      const gap=climbBodyCorrection.dot(climbBodyNormal);
+      if(gap<0.48)pos.addScaledVector(climbBodyNormal,0.48-gap);
+    }
+    return pos;
+  }
+  const targets=climbBodySurfaceMeshes(h);
   climbBodyNormal.copy(climbSurfaceNormal).setY(0);
   if(climbBodyNormal.lengthSq()<0.04)return pos;
   climbBodyNormal.normalize();
@@ -1131,6 +1250,44 @@ function vaultSurfaceBox(box,h){
   return owner===root||owner===landing||owner===landingRoot||
     colliderMatchesSurface(owner,root,landingRoot);
 }
+
+/* The standing player collider begins just above the root, and the mantle rig
+   never draws a boot below it. Keep a small extra gap over the sampled lip so
+   neither the capsule nor the rendered feet can cut through its top edge. */
+const MANTLE_LIP_ROOT_CLEARANCE=0.04;
+function mantleForwardStart(from,to,clearance,lipY){
+  const requiredY=(Number.isFinite(lipY)?lipY:to.y-0.02)+MANTLE_LIP_ROOT_CLEARANCE;
+  /* Find the first point on the existing vertical arc that is genuinely above
+     the lip. One extra sample is deliberate: fixed-step interpolation between
+     the last lift-only frame and the first forward frame then stays clear too. */
+  const samples=128;
+  for(let i=1;i<samples;i++){
+    const t=i/samples,s=smooth5(t);
+    const y=lerp(from.y,to.y,s)+4*t*(1-t)*clearance;
+    if(y>=requiredY)return Math.min(0.9,(i+1)/samples);
+  }
+  return -1;
+}
+function vaultPathPoint(from,to,t,clearance,push,normal,forwardStart,linear,out){
+  const verticalS=linear?t:smooth5(t);
+  let forwardS=t;
+  if(!linear){
+    const phase=Math.max(0,Math.min(1,
+      (t-forwardStart)/Math.max(0.001,1-forwardStart)));
+    forwardS=smooth5(phase);
+  }
+  out.set(
+    lerp(from.x,to.x,forwardS),
+    lerp(from.y,to.y,verticalS)+4*t*(1-t)*clearance,
+    lerp(from.z,to.z,forwardS)
+  );
+  /* A handhold mantle applies its inward flourish only during actual forward
+     travel. The former time-based push entered the wall while the body was
+     still below the top, which was the visible corner/edge clipping. */
+  const pushPhase=linear?t:forwardS;
+  out.addScaledVector(normal,-Math.sin(pushPhase*Math.PI)*push);
+  return out;
+}
 function playerOverlapsBox(pos,box){
   const owner=box.owner,ownerData=owner&&owner.userData;
   if(ownerData&&(ownerData.kind==='cell'||ownerData.kind==='roof'||
@@ -1182,7 +1339,7 @@ function climbPathClearance(fromHold,toHold,from,to){
     const outwardGap=(climbPathSample.x-climbPathSurface.x)*climbPathNormal.x+
       (climbPathSample.z-climbPathSurface.z)*climbPathNormal.z;
     if(outwardGap<0.34)return false;
-    for(const box of boxes){
+    for(const box of getStaticBoxCandidatesAt(climbPathSample)){
       if(box.active===false)continue;
       if(settledBoxSet.has(box)||colliderMatchesSurface(box.owner,fromRoot,toRoot))continue;
       if(playerOverlapsBox(climbPathSample,box))return false;
@@ -1212,7 +1369,7 @@ function climbAttachClearance(h,from,to){
     const outwardGap=(climbPathSample.x-climbPathSurfaceFrom.x)*climbPathNormal.x+
       (climbPathSample.z-climbPathSurfaceFrom.z)*climbPathNormal.z;
     if(outwardGap<0.34)return false;
-    for(const box of boxes){
+    for(const box of getStaticBoxCandidatesAt(climbPathSample)){
       if(box.active===false)continue;
       if(settledBoxSet.has(box)||colliderMatchesSurface(box.owner,root,null))continue;
       if(playerOverlapsBox(climbPathSample,box))return false;
@@ -1226,7 +1383,7 @@ function climbAttachClearance(h,from,to){
   }
   return true;
 }
-function vaultPathClearance(h,from,to,clearance,push){
+function vaultPathClearance(h,from,to,clearance,push,forwardStart){
   holdSurfaceAnchor(h,climbSurfacePoint,climbSurfaceNormal);
   vaultPathNormal.copy(climbSurfaceNormal).setY(0);
   if(vaultPathNormal.lengthSq()<1e-4)vaultPathNormal.set(0,0,1);
@@ -1235,11 +1392,10 @@ function vaultPathClearance(h,from,to,clearance,push){
      freshly settled shard cannot be skipped between the start and landing. */
   const vaultRoot=holdSurfaceRoot(h);
   for(let i=1;i<=18;i++){
-    const t=i/18,s=smooth5(t);
-    vaultPathSample.lerpVectors(from,to,s);
-    vaultPathSample.y+=4*t*(1-t)*clearance;
-    vaultPathSample.addScaledVector(vaultPathNormal,-Math.sin(t*Math.PI)*push);
-    for(const box of boxes){
+    const t=i/18;
+    vaultPathPoint(from,to,t,clearance,push,vaultPathNormal,
+      forwardStart,false,vaultPathSample);
+    for(const box of getStaticBoxCandidatesAt(vaultPathSample)){
       if(box.active===false)continue;
       if(settledBoxSet.has(box)||vaultSurfaceBox(box,h))continue;
       if(playerOverlapsBox(vaultPathSample,box))return false;
@@ -1323,10 +1479,9 @@ function lowVaultPathClearance(from,to,clearance,push,obstacle,landing){
      tests against the full player volume. */
   for(let i=1;i<=18;i++){
     const t=i/18;
-    vaultPathSample.lerpVectors(from,to,t);
-    vaultPathSample.y+=4*t*(1-t)*clearance;
-    vaultPathSample.addScaledVector(vaultPathNormal,-Math.sin(t*Math.PI)*push);
-    for(const box of boxes){
+    vaultPathPoint(from,to,t,clearance,push,vaultPathNormal,
+      0,true,vaultPathSample);
+    for(const box of getStaticBoxCandidatesAt(vaultPathSample)){
       if(box.active===false)continue;
       if(settledBoxSet.has(box)||
          colliderMatchesSurface(box.owner,obstacleRoot,landingRoot))continue;
@@ -1347,17 +1502,110 @@ function lowVaultPathClearance(from,to,clearance,push,obstacle,landing){
   }
   return true;
 }
-function tryAutoLowVault(dir,speed,targetSpeed){
-  /* Input can begin with the capsule already touching low cover. Collision
-     resolution then erases the tiny first-frame velocity before it ever
-     reaches the old 4.2-unit trigger threshold, leaving the player glued to
-     an otherwise valid waist-high obstacle. Give committed forward input a
-     bounded start assist; established movement still supplies its real speed
-     and therefore keeps walk/sprint timing distinct. */
+
+const lowVaultPromptRange={near:0,far:0};
+function lowVaultXZRayInterval(minX,maxX,minZ,maxZ,dir,padding,maxDistance,out){
+  let near=0,far=maxDistance;
+  minX-=padding;maxX+=padding;minZ-=padding;maxZ+=padding;
+  if(Math.abs(dir.x)<0.0001){
+    if(player.pos.x<minX||player.pos.x>maxX)return false;
+  }else{
+    let a=(minX-player.pos.x)/dir.x,b=(maxX-player.pos.x)/dir.x;
+    if(a>b){const swap=a;a=b;b=swap;}
+    near=Math.max(near,a);far=Math.min(far,b);
+    if(near>far)return false;
+  }
+  if(Math.abs(dir.z)<0.0001){
+    if(player.pos.z<minZ||player.pos.z>maxZ)return false;
+  }else{
+    let a=(minZ-player.pos.z)/dir.z,b=(maxZ-player.pos.z)/dir.z;
+    if(a>b){const swap=a;a=b;b=swap;}
+    near=Math.max(near,a);far=Math.min(far,b);
+    if(near>far)return false;
+  }
+  if(far<0||near>maxDistance)return false;
+  out.near=Math.max(0,near);out.far=far;
+  return out.far>=out.near;
+}
+
+function canPromptLowVault(dir){
+  const recoveringMantle=player.vaultRecovery>0&&player.vaultKind!=='low';
+  if(player.mode!=='ground'||!player.onGround||player.cool>0||player.grace>0||
+     recoveringMantle||dir.lengthSq()<0.01)return false;
+  lowVaultForward.copy(dir).setY(0);
+  if(lowVaultForward.lengthSq()<0.01)return false;
+  lowVaultForward.normalize();
+
+  /* Find the first waist-level collision cell with a very small static-grid
+     query. The authored surface owns the aggregate dimensions below, so a
+     voxelized sandbag is classified as one cover object instead of hundreds
+     of tiny, incomplete obstacles. */
+  const lookAhead=1.08,corridorFar=LOW_VAULT_MAX_DEPTH+1.08;
+  let candidates=getPlayerStaticBoxCandidates(lookAhead+0.45);
+  let obstacleBox=null,obstacleRoot=null,obstacleNear=Infinity;
+  for(const box of candidates){
+    if(box.active===false||!box.owner||box.min.y>player.pos.y+0.42||
+       box.max.y<player.pos.y+0.12)continue;
+    if(!lowVaultXZRayInterval(box.min.x,box.max.x,box.min.z,box.max.z,
+      lowVaultForward,0.08,lookAhead,lowVaultPromptRange)||
+      lowVaultPromptRange.near>=obstacleNear)continue;
+    obstacleBox=box;
+    obstacleRoot=lowVaultSurfaceRoot(box.owner);
+    obstacleNear=lowVaultPromptRange.near;
+  }
+  if(!obstacleBox||!obstacleRoot||!lowVaultSurfaceStable(obstacleRoot))return false;
+
+  /* Voxel structures already cache their authored world bounds. Reading those
+     scalars is constant-time even for the 35k-voxel scene; non-voxel cover
+     falls back to the complete physics box that produced the near hit. */
+  const obstacleData=obstacleRoot.userData||{};
+  const obstacleStructure=obstacleData.voxelStructure;
+  const obstacleMinX=obstacleStructure?obstacleStructure.origin.x:obstacleBox.min.x;
+  const obstacleMaxX=obstacleStructure?
+    obstacleStructure.origin.x+obstacleStructure.nx*obstacleStructure.sx:obstacleBox.max.x;
+  const obstacleMinY=obstacleStructure?obstacleStructure.origin.y:obstacleBox.min.y;
+  const obstacleMaxY=obstacleStructure?
+    obstacleStructure.origin.y+obstacleStructure.ny*obstacleStructure.sy:obstacleBox.max.y;
+  const obstacleMinZ=obstacleStructure?obstacleStructure.origin.z:obstacleBox.min.z;
+  const obstacleMaxZ=obstacleStructure?
+    obstacleStructure.origin.z+obstacleStructure.nz*obstacleStructure.sz:obstacleBox.max.z;
+  const obstacleHeight=obstacleMaxY-player.pos.y;
+  const sizeX=obstacleMaxX-obstacleMinX,sizeZ=obstacleMaxZ-obstacleMinZ;
+  if(obstacleHeight<LOW_VAULT_MIN_HEIGHT||obstacleHeight>LOW_VAULT_MAX_HEIGHT||
+     obstacleMinY>player.pos.y+0.34||
+     (sizeX>LOW_VAULT_MAX_DEPTH*2&&sizeZ>LOW_VAULT_MAX_DEPTH*2)||
+     !lowVaultXZRayInterval(obstacleMinX,obstacleMaxX,obstacleMinZ,obstacleMaxZ,
+       lowVaultForward,0.035,corridorFar,lowVaultPromptRange))return false;
+  const obstacleFar=lowVaultPromptRange.far;
+  const depth=obstacleFar-obstacleNear;
+  if(depth<0.12||depth>LOW_VAULT_MAX_DEPTH+0.2)return false;
+
+  const landingDistance=obstacleFar+0.62;
+  const landingX=player.pos.x+lowVaultForward.x*landingDistance;
+  const landingZ=player.pos.z+lowVaultForward.z*landingDistance;
+  candidates=getPlayerStaticBoxCandidates(landingDistance+0.55);
+  for(const box of candidates){
+    if(box.active===false||!box.owner||
+       lowVaultSurfaceRoot(box.owner)===obstacleRoot)continue;
+    const blocksBody=box.min.y<player.pos.y+1.58&&box.max.y>player.pos.y+0.18;
+    if(blocksBody&&landingX>box.min.x-0.32&&landingX<box.max.x+0.32&&
+       landingZ>box.min.z-0.32&&landingZ<box.max.z+0.32)return false;
+    if(box.max.y>player.pos.y+1.32&&
+       lowVaultXZRayInterval(box.min.x,box.max.x,box.min.z,box.max.z,
+         lowVaultForward,0.24,Math.min(corridorFar,landingDistance+0.2),
+         lowVaultPromptRange))return false;
+  }
+  return true;
+}
+
+function tryLowVault(dir,speed,targetSpeed){
+  /* Space can be pressed with the capsule already touching low cover. Give the
+     explicit action a bounded start assist; established movement still
+     supplies its real speed and therefore keeps walk/sprint timing distinct. */
   const assistedSpeed=Math.max(speed,Math.min(targetSpeed||speed,8.8));
   const recoveringMantle=player.vaultRecovery>0&&player.vaultKind!=='low';
   if(player.mode!=='ground'||!player.onGround||dir.lengthSq()<0.01||assistedSpeed<4.2||
-     player.cool>0||player.grace>0||recoveringMantle||player.jumpBuffer>0)return false;
+     player.cool>0||player.grace>0||recoveringMantle)return false;
   lowVaultForward.copy(dir).setY(0);
   if(lowVaultForward.lengthSq()<0.01)return false;
   lowVaultForward.normalize();
@@ -1380,20 +1628,30 @@ function tryAutoLowVault(dir,speed,targetSpeed){
   }
   if(!obstacle)return false;
   const obstacleRoot=lowVaultSurfaceRoot(obstacle);
-  const probeY=baseY+AUTO_VAULT_MAX_HEIGHT+0.42;
-  const probeFar=AUTO_VAULT_MAX_HEIGHT+0.78;
-  lowVaultProbePoint.copy(lowVaultFrontPoint).addScaledVector(lowVaultForward,0.07);
-  if(!lowVaultProbeDown(lowVaultProbePoint.x,lowVaultProbePoint.z,probeY,probeFar,
-    obstacleRoot,NaN,0))return false;
+  const probeY=baseY+LOW_VAULT_MAX_HEIGHT+0.42;
+  const probeFar=LOW_VAULT_MAX_HEIGHT+0.78;
+  lowVaultProbeSide.set(-lowVaultForward.z,0,lowVaultForward.x);
+  let probeSideOffset=0,foundTop=false;
+  for(const sideOffset of LOW_VAULT_PROBE_SIDE_OFFSETS){
+    lowVaultProbePoint.copy(lowVaultFrontPoint).addScaledVector(lowVaultForward,0.07)
+      .addScaledVector(lowVaultProbeSide,sideOffset);
+    if(!lowVaultProbeDown(lowVaultProbePoint.x,lowVaultProbePoint.z,probeY,probeFar,
+      obstacleRoot,NaN,0))continue;
+    probeSideOffset=sideOffset;
+    foundTop=true;
+    break;
+  }
+  if(!foundTop)return false;
   lowVaultTopPoint.copy(lowVaultProbePoint);
   lowVaultTopNormal.copy(lowVaultProbeNormal);
   const obstacleHeight=lowVaultTopPoint.y-baseY;
-  if(obstacleHeight<AUTO_VAULT_MIN_HEIGHT||obstacleHeight>AUTO_VAULT_MAX_HEIGHT)return false;
+  if(obstacleHeight<LOW_VAULT_MIN_HEIGHT||obstacleHeight>LOW_VAULT_MAX_HEIGHT)return false;
 
   let lastSolid=0.07,edgeDepth=-1,depthMisses=0;
-  for(let depth=0.07+AUTO_VAULT_DEPTH_STEP;
-      depth<=AUTO_VAULT_MAX_DEPTH+AUTO_VAULT_DEPTH_STEP;depth+=AUTO_VAULT_DEPTH_STEP){
-    lowVaultProbePoint.copy(lowVaultFrontPoint).addScaledVector(lowVaultForward,depth);
+  for(let depth=0.07+LOW_VAULT_DEPTH_STEP;
+      depth<=LOW_VAULT_MAX_DEPTH+LOW_VAULT_DEPTH_STEP;depth+=LOW_VAULT_DEPTH_STEP){
+    lowVaultProbePoint.copy(lowVaultFrontPoint).addScaledVector(lowVaultForward,depth)
+      .addScaledVector(lowVaultProbeSide,probeSideOffset);
     if(lowVaultProbeDown(lowVaultProbePoint.x,lowVaultProbePoint.z,probeY,probeFar,
       obstacleRoot,lowVaultTopPoint.y,0.24)){
       lastSolid=depth;
@@ -1405,13 +1663,13 @@ function tryAutoLowVault(dir,speed,targetSpeed){
        miss before declaring the obstacle finished. */
     depthMisses++;
     if(depthMisses>=2){
-      edgeDepth=lastSolid+AUTO_VAULT_DEPTH_STEP*0.5;
+      edgeDepth=lastSolid+LOW_VAULT_DEPTH_STEP*0.5;
       break;
     }
   }
   /* A narrow hand/foot contact is still vaultable, but a surface that remains
      solid beyond this budget is a platform or building and must use climbing. */
-  if(edgeDepth<0.15||edgeDepth>AUTO_VAULT_MAX_DEPTH)return false;
+  if(edgeDepth<0.15||edgeDepth>LOW_VAULT_MAX_DEPTH)return false;
   const landingDistance=edgeDepth+0.62;
   lowVaultProbePoint.copy(lowVaultFrontPoint).addScaledVector(lowVaultForward,landingDistance);
   const landingProbeY=Math.max(baseY,lowVaultTopPoint.y)+0.86;
@@ -1422,12 +1680,12 @@ function tryAutoLowVault(dir,speed,targetSpeed){
   lowVaultLandingNormal.copy(lowVaultProbeNormal);
   const landingDelta=lowVaultLandingPoint.y-baseY;
   if(landingDelta<-0.42||landingDelta>0.36)return false;
-
   const heightBlend=Math.max(0,Math.min(1,
-    (obstacleHeight-AUTO_VAULT_MIN_HEIGHT)/(AUTO_VAULT_MAX_HEIGHT-AUTO_VAULT_MIN_HEIGHT)));
+    (obstacleHeight-LOW_VAULT_MIN_HEIGHT)/(LOW_VAULT_MAX_HEIGHT-LOW_VAULT_MIN_HEIGHT)));
   const speedBlend=Math.max(0,Math.min(1,
-    (assistedSpeed-7)/(PLAYER_SPRINT_SPEED-7)));
-  const depthBlend=Math.max(0,Math.min(1,edgeDepth/AUTO_VAULT_MAX_DEPTH));
+    (assistedSpeed-PLAYER_WALK_SPEED)/
+    Math.max(0.01,PLAYER_SPRINT_SPEED-PLAYER_WALK_SPEED)));
+  const depthBlend=Math.max(0,Math.min(1,edgeDepth/LOW_VAULT_MAX_DEPTH));
   const clearance=0.48+heightBlend*0.2+speedBlend*0.055;
   const push=0.07+depthBlend*0.1;
   lowVaultLandingPoint.addScaledVector(UP,0.02);
@@ -1453,6 +1711,7 @@ function tryAutoLowVault(dir,speed,targetSpeed){
     0.39-speedBlend*0.075+heightBlend*0.035+depthBlend*0.025));
   player.vaultClearance=clearance;
   player.vaultPush=push;
+  player.vaultForwardStart=0;
   player.vaultT=0;
   player.vaultRecovery=0;
   player.vaultRecoveryDuration=0.18;
@@ -1473,6 +1732,8 @@ function refreshVaultTarget(h){
      original cell has been replaced by the fracture field. */
   const previousRoot=h.vaultMesh.userData&&h.vaultMesh.userData.surfaceRoot||h.vaultMesh;
   vaultTargetExpected.copy(h.vault);
+  const previousLipOffset=Number.isFinite(h.vaultLipY)?
+    h.vaultLipY-h.vault.y:-0.02;
   holdSurfaceAnchor(h,climbSurfacePoint,climbSurfaceNormal);
   mantleProbeAxes(climbSurfaceNormal,vaultTargetFlat,vaultTargetSide);
   const result=mantleDownHit(vaultTargetExpected,vaultTargetFlat,vaultTargetSide,
@@ -1491,6 +1752,9 @@ function refreshVaultTarget(h){
   h.vault.copy(result.hit.point).addScaledVector(UP,0.02);
   h.vaultMesh=result.hit.object;
   h.vaultNormal.copy(result.normal).normalize();
+  /* A moving structural cell carries its lip and landing together. Retain the
+     measured height offset while the exact landing point is revalidated. */
+  h.vaultLipY=h.vault.y+Math.max(-0.48,Math.min(0.48,previousLipOffset));
   return true;
 }
 
@@ -1500,7 +1764,7 @@ function startVault(){
   if(h.vaultMesh&&!surfaceObjectIsLive(h.vaultMesh)){
     /* A stored mantle target can outlive a destructible landing surface. Do not
        reuse that stale point and drive the player through newly missing rubble. */
-    h.vault=null;h.vaultMesh=null;return false;
+    h.vault=null;h.vaultMesh=null;h.vaultLipY=NaN;return false;
   }
   if(!refreshVaultTarget(h))return false;
   holdSurfaceAnchor(h,climbSurfacePoint,climbSurfaceNormal);
@@ -1520,7 +1784,8 @@ function startVault(){
      apex makes the motion read as a mantle instead of a vertical teleport. */
   const push=Math.max(0.34,Math.min(0.82,0.34+horizontal*0.12+rise*0.05));
   const clearance=Math.max(0.82,Math.min(1.5,0.68+rise*0.38+horizontal*0.1));
-  if(!vaultPathClearance(h,player.pos,h.vault,clearance,push)){
+  const forwardStart=mantleForwardStart(player.pos,h.vault,clearance,h.vaultLipY);
+  if(forwardStart<0||!vaultPathClearance(h,player.pos,h.vault,clearance,push,forwardStart)){
     flashHint('VAULT BLOCKED — clear the landing',true);
     return false;
   }
@@ -1544,12 +1809,10 @@ function startVault(){
   player.vaultDuration=duration;
   player.vaultPush=push;
   player.vaultClearance=clearance;
+  player.vaultForwardStart=forwardStart;
   player.vaultT=0;
-  /* Start the camera's slow orbit before the body reaches the lip. Camera yaw
-     describes the side of the player where the chase camera sits, so the
-     outward normal places it behind a body that continues inward over the
-     obstacle. Body and camera headings intentionally use opposite signs. */
-  targetYaw=Math.atan2(player.vaultNormal.x,player.vaultNormal.z);
+  /* Mantling owns body movement only. Camera yaw and pitch remain entirely
+     under mouse input so reaching a lip cannot turn the player's view. */
   player.vel.set(0,0,0);player.onGround=false;
   return true;
 }
@@ -1615,7 +1878,7 @@ function tryUp(h){
      after a fracture. Search only a small same-surface neighborhood on the
      input edge; this is deliberately not part of the per-frame solver. */
   const holdRoot=holdSurfaceRoot(h),holdParent=structuralColliderParent(holdRoot);
-  for(let j=0;j<HOLDS.length;j++){
+  for(const j of nearbyClimbHoldIndices(h.pos,2.2)){
     if(j===player.hold||climbUpCandidates.indexOf(j)>=0)continue;
     const candidate=HOLDS[j];
     if(!holdSurfaceIsLive(candidate))continue;
@@ -1644,13 +1907,13 @@ function tryUp(h){
     if(startVault())return true;
   /* Re-sample the landing now rather than trusting the startup graph. The world
      can contain moving rubble by the time the player reaches this hold. */
-  h.vault=null;h.vaultMesh=null;h.vaultNormal.set(0,1,0);
+  h.vault=null;h.vaultMesh=null;h.vaultLipY=NaN;h.vaultNormal.set(0,1,0);
   const refreshedTarget=mantleTarget(h);
   if(refreshedTarget&&startVault())return true;
   /* mantleTarget keeps a reusable vector while probing. Do not leave that
      zero-vector placeholder looking like a valid cache after every failed
      probe; the next input must be able to retry a fresh landing search. */
-  h.vault=null;h.vaultMesh=null;h.vaultNormal.set(0,1,0);
+  h.vault=null;h.vaultMesh=null;h.vaultLipY=NaN;h.vaultNormal.set(0,1,0);
   return false;
 }
 
@@ -1661,25 +1924,25 @@ function afterArrive(){
       climbIntentActive)tryUp(h);
 }
 
-/* Fast arcade-shooter traversal. World geometry is intentionally oversized,
-   so realistic metre-per-second values read as a slow jog here. These values
-   drive the player root itself; animation and FOV only follow the real speed. */
-const PLAYER_WALK_SPEED=16.0;
-const PLAYER_SPRINT_SPEED=26.0;
-const PLAYER_GROUND_ACCEL=60;
-const PLAYER_GROUND_BRAKE=72;
+/* Ground movement is tuned to a deliberate tactical-shooter scale. Normal
+   movement matches a rifle-out pace, while Shift provides a modest traversal
+   boost instead of turning the player into an arcade-speed sprinter. */
+const PLAYER_WALK_SPEED=6.75;
+const PLAYER_SPRINT_SPEED=8.4375;
+const PLAYER_GROUND_ACCEL=32;
+const PLAYER_GROUND_BRAKE=44;
 
 function groundStep(dt,dir){
   const run=(keys.ShiftLeft||keys.ShiftRight);
+  const frameStartX=player.pos.x,frameStartZ=player.pos.z;
   if(player.vaultRecovery<=0&&player.vaultKind==='low'){
     player.vaultKind='none';player.vaultObstacle=null;player.vaultLandingMesh=null;
   }
-  /* Combat movement needs to cross this large arena decisively. These are
-     deliberate gameplay speeds, not animation multipliers: ordinary WASD is
-     already quick and Shift is a genuinely fast sprint. */
+  /* These are root-motion speeds, not animation multipliers. Shift remains
+     useful for rotation without overwhelming close-range positioning. */
   const spd=run?PLAYER_SPRINT_SPEED:PLAYER_WALK_SPEED;
   const wasOnGround=player.onGround;
-  const previousHorizontalSpeed=Math.hypot(player.vel.x,player.vel.z);
+  const previousLocomotionSpeed=walkAmt;
   if(wasOnGround)player.jumpGrace=0.12;
   const incomingVertical=player.vel.y;
   const hasInput=dir.lengthSq()>0.01;
@@ -1692,7 +1955,7 @@ function groundStep(dt,dir){
     Math.max(0,Math.min(1,1-player.vaultRecovery/recoveryDuration)):1;
   /* A low vault exits with live running momentum. Its recovery is purely a
      body-pose blend; throttling the input here would recreate the exact hitch
-     the automatic traversal is meant to remove. */
+     the contextual traversal is meant to remove. */
   const recoveryInput=player.vaultRecovery>0&&player.vaultKind!=='low'?
     lerp(0.15,1,smooth5(recoveryT)):1;
   const desiredX=dir.x*spd*recoveryInput,desiredZ=dir.z*spd*recoveryInput;
@@ -1713,12 +1976,19 @@ function groundStep(dt,dir){
   const targetAccelZ=Math.max(-1,Math.min(1,(player.vel.z-velocityBeforeZ)*accelScale));
   movementAccelWorld.x=dampValue(movementAccelWorld.x,targetAccelX,18,dt);
   movementAccelWorld.z=dampValue(movementAccelWorld.z,targetAccelZ,18,dt);
-  const autoVaultSpeed=Math.hypot(player.vel.x,player.vel.z);
-  if(hasInput&&tryAutoLowVault(dir,autoVaultSpeed,spd)){
-    moveSpeed+=(autoVaultSpeed-moveSpeed)*Math.min(1,dt*8);
-    walkAmt=autoVaultSpeed;
-    sprinting=false;camRollTarget=0;
-    return;
+  const vaultEntrySpeed=Math.hypot(player.vel.x,player.vel.z);
+  if(player.jumpBuffer>0&&player.onGround){
+    /* Contextual vaulting follows the camera-facing prompt. This keeps the
+       action deterministic even when Space lands between movement samples or
+       the player is holding a sideways key while looking at the obstacle. */
+    lowVaultActionDir.copy(moveFwd).setY(0);
+    if(tryLowVault(lowVaultActionDir,vaultEntrySpeed,spd)){
+      player.jumpBuffer=0;
+      moveSpeed+=(vaultEntrySpeed-moveSpeed)*Math.min(1,dt*8);
+      walkAmt=0;
+      sprinting=false;camRollTarget=0;
+      return;
+    }
   }
   player.vel.y-=22*dt;
   const py=player.pos.y;
@@ -1730,7 +2000,7 @@ function groundStep(dt,dir){
   const travel=Math.hypot(player.vel.x,player.vel.z)*dt;
   const motionSteps=Math.max(1,Math.min(12,Math.ceil(travel/0.14)));
   const motionDt=dt/motionSteps;
-  let steppedThisFrame=false;
+  let stepTestedThisFrame=false;
   for(let i=0;i<motionSteps;i++){
     playerCollisionBefore.copy(player.pos);
     playerStepIntended.copy(player.pos);
@@ -1745,15 +2015,16 @@ function groundStep(dt,dir){
        collider. Remove only the velocity component pushing into that contact;
        the tangential component survives, so running along a wall slides
        naturally instead of stuttering against it. */
-    playerCollisionCorrection.subVectors(player.pos,playerCollisionBefore).setY(0);
+    playerCollisionCorrection.subVectors(player.pos,playerStepIntended).setY(0);
     const correctionLengthSq=playerCollisionCorrection.lengthSq();
-    if(correctionLengthSq>1e-6){
+    if(collided&&correctionLengthSq>1e-6){
       playerCollisionNormal.copy(playerCollisionCorrection).multiplyScalar(1/Math.sqrt(correctionLengthSq));
       const intoContact=player.vel.dot(playerCollisionNormal);
-      if(intoContact>0)player.vel.addScaledVector(playerCollisionNormal,-intoContact);
+      if(intoContact<0)player.vel.addScaledVector(playerCollisionNormal,-intoContact);
     }
-    if(collided&&!steppedThisFrame&&wasOnGround&&player.grace<=0&&
+    if(collided&&!stepTestedThisFrame&&wasOnGround&&player.grace<=0&&
        Math.abs(incomingVertical)<1.0){
+      stepTestedThisFrame=true;
       /* Treat a small obstruction as a step only when the raised capsule can
          clear it and a real standable top exists below the step limit. A
          failed probe restores the already-corrected position, so walls and
@@ -1777,21 +2048,26 @@ function groundStep(dt,dir){
         player.vel.z=playerStepVelocity.z;
         player.onGround=true;
         player.landingSurface=null;
-        steppedThisFrame=true;
       }else player.pos.copy(playerStepBlocked);
     }
   }
   const gh=groundBelow(player.pos.x,player.pos.z,Math.max(py,player.pos.y)+0.8);
   if(player.pos.y<=gh){
     player.pos.y=gh;player.vel.y=0;player.onGround=true;
+    player.jumpClimbActive=false;
     if(!wasOnGround&&incomingVertical<-1.8)landingKick=Math.min(1.15,-incomingVertical/7.6);
   }
-  else player.onGround=(player.pos.y-gh)<0.08;
+  else{
+    player.onGround=player.vel.y<=0&&(player.pos.y-gh)<0.08;
+    if(player.onGround)player.jumpClimbActive=false;
+  }
   if(player.jumpBuffer>0&&(player.onGround||player.jumpGrace>0)){
     player.vel.y=7.6;player.onGround=false;player.jumpGrace=0;player.jumpBuffer=0;
+    player.jumpClimbActive=true;player.jumpLaunchY=player.pos.y;
     player.landingSurface=null;Sfx.jump();
   }
   const climbIntentActive=performance.now()<climbIntentUntil;
+  const climbDownIntentActive=performance.now()<climbDownIntentUntil;
   const climbing=run;
   if(((climbing&&keys.KeyW)||climbIntentActive)&&
      (dir.lengthSq()>0.01||climbIntentDir.lengthSq()>0.01)){
@@ -1801,24 +2077,34 @@ function groundStep(dt,dir){
     player.climbDir.copy(dir.lengthSq()>0.01?dir:climbIntentDir);
     player.climbBuffer=0.16;
   }
-  if((climbing||climbIntentActive)&&player.climbBuffer>0&&
-     player.climbDir.lengthSq()>0.01)
-    tryGrab(player.climbDir,!player.onGround);
+  /* A deliberate jump may carry its gained height into a climb. Waiting for a
+     short physical rise prevents Space+Shift+W from selecting the wall's first
+     ground-level hold on the launch frame. Walking off a roof never sets this
+     flag, so falling remains authoritative until C explicitly asks for a grab. */
+  const airborneJumpClimb=player.jumpClimbActive&&!player.onGround&&
+    player.pos.y>=player.jumpLaunchY+0.3;
+  if(climbDownIntentActive)tryGrab(!player.onGround,true);
+  else if((player.onGround||airborneJumpClimb)&&
+          (climbing||climbIntentActive)&&player.climbBuffer>0&&
+          player.climbDir.lengthSq()>0.01)tryGrab(airborneJumpClimb);
   if(dir.lengthSq()>0.01)player.heading=Math.atan2(dir.x,dir.z);
-  const horizontalSpeed=Math.hypot(player.vel.x,player.vel.z);
+  const locomotionSpeed=Math.hypot(
+    player.pos.x-frameStartX,player.pos.z-frameStartZ)/Math.max(0.001,dt);
   const speedAcceleration=Math.max(-1,Math.min(1,
-    (horizontalSpeed-previousHorizontalSpeed)/Math.max(0.001,dt)/12));
+    (locomotionSpeed-previousLocomotionSpeed)/Math.max(0.001,dt)/12));
   movementAccel=dampValue(movementAccel,speedAcceleration,18,dt);
-  moveSpeed+=(horizontalSpeed-moveSpeed)*Math.min(1,dt*8);
-  walkAmt=horizontalSpeed;
-  const moving=horizontalSpeed>0.08&&player.onGround;
-  sprinting=moving&&run&&horizontalSpeed>1.0;
+  moveSpeed+=(locomotionSpeed-moveSpeed)*Math.min(1,dt*8);
+  walkAmt=locomotionSpeed;
+  const moving=locomotionSpeed>0.08&&player.onGround;
+  sprinting=moving&&run;
   camMoveFwd.set(-Math.sin(camYaw),0,-Math.cos(camYaw));
   camMoveRight.set(-camMoveFwd.z,0,camMoveFwd.x);
   const strafe=dir.x*camMoveRight.x+dir.z*camMoveRight.z;
-  camRollTarget=Math.max(-0.12,Math.min(0.12,strafe*0.05));
+  const locomotionBlend=Math.min(1,locomotionSpeed/PLAYER_WALK_SPEED);
+  camRollTarget=moving?
+    Math.max(-0.12,Math.min(0.12,strafe*0.05*locomotionBlend)):0;
   if(moving){
-    bobPhase+=dt*Math.min(34,9+horizontalSpeed*0.95);
+    bobPhase+=dt*Math.min(34,9+locomotionSpeed*0.95);
     camBobAmt=Math.min(camBobAmt+dt*3,0.06);
   }else{
     camBobAmt=Math.max(camBobAmt-dt*6,0);
@@ -1837,6 +2123,7 @@ function hangStep(dt){
   resolveColliders(holdSurfaceRoot(h));
   const run=(keys.ShiftLeft||keys.ShiftRight);
   const climbIntentActive=performance.now()<climbIntentUntil;
+  const climbDownIntentActive=performance.now()<climbDownIntentUntil;
   const vaultIntent=keys.Space||performance.now()<vaultIntentUntil;
   if(vaultIntent){
     /* The startup graph is only a hint. A ledge can become reachable after the
@@ -1845,7 +2132,7 @@ function hangStep(dt){
        input edge so SPACE remains a reliable mantle action instead of silently
        turning into a drop just because the cache was empty. */
     if(!h.vault||!h.vaultMesh||!surfaceObjectIsLive(h.vaultMesh)){
-      h.vault=null;h.vaultMesh=null;h.vaultNormal.set(0,1,0);
+      h.vault=null;h.vaultMesh=null;h.vaultLipY=NaN;h.vaultNormal.set(0,1,0);
       mantleTarget(h);
     }
     if(h.vault&&h.vaultMesh&&startVault())return;
@@ -1855,6 +2142,23 @@ function hangStep(dt){
     (keys.KeyW||climbIntentActive||player.climbBuffer>0);
   if(wantUp){
     if(tryUp(h))return;
+  }
+  if(climbDownIntentActive){
+    climbDownIntentUntil=0;
+    if(h.down.length){
+      const next=pickMin(h,h.down);
+      if(startMove(next))return;
+    }
+    /* No lower handhold remains, so the explicit descent action releases the
+       wall with a small outward clearance impulse. */
+    player.mode='ground';
+    player.vel.copy(climbSurfaceNormal).setY(0).normalize().multiplyScalar(1.4);
+    player.vel.y=1;
+    player.pos.addScaledVector(player.vel,0.04);
+    player.cool=0.4;
+    player.grace=0.45;
+    player.onGround=false;
+    return;
   }
   const dropIntent=keys.KeyS||keys.Space||performance.now()<dropIntentUntil;
   if(dropIntent){
@@ -1904,7 +2208,9 @@ function moveStep(dt){
   player.attachT+=dt;
   const from=player.mode==='attach'?player.attachFrom:hangPos(player.moveFrom,hangFromPos);
   const to=hangPos(player.moveTo,hangToPos);
-  const dur=player.mode==='attach'?0.24:Math.max(0.26,from.distanceTo(to)/2.2);
+  const dur=player.mode==='attach'?
+    Math.max(0.32,Math.min(0.46,from.distanceTo(to)/5.0)):
+    Math.max(0.26,from.distanceTo(to)/2.2);
   player.moveDuration=dur;
   const k=Math.min(1,player.attachT/dur);
   const s=k*k*(3-2*k);
@@ -1957,14 +2263,11 @@ function vaultStep(dt){
   }
   player.vaultT+=dt/player.vaultDuration;
   const k=Math.min(1,player.vaultT);
-  /* An automatic speed vault carries forward momentum through both endpoints;
+  /* A low-cover vault carries forward momentum through both endpoints;
      the handhold mantle keeps its deliberate pull-up easing. */
-  const s=lowVault?k:smooth5(k);
-  vaultDesiredPos.lerpVectors(player.vaultFrom,player.vaultTo,s);
-  vaultDesiredPos.y+=4*k*(1-k)*player.vaultClearance;
-  /* Clear the lip at mid-vault by travelling through the wall plane, then
-     settle back onto the landing surface instead of hovering in front of it. */
-  vaultDesiredPos.addScaledVector(player.vaultNormal,-Math.sin(k*Math.PI)*player.vaultPush);
+  vaultPathPoint(player.vaultFrom,player.vaultTo,k,
+    player.vaultClearance,player.vaultPush,player.vaultNormal,
+    player.vaultForwardStart,lowVault,vaultDesiredPos);
   /* Re-run the lightweight body clearance while the mantle is in flight. The
      start probe guards the planned path, but moving rubble or another prop can
      enter that corridor during the vault. Ignore only the wall and landing
@@ -2043,10 +2346,8 @@ function vaultStep(dt){
        root had landed correctly. */
     player.vaultRecoveryDuration=lowVault?0.18:0.28;
     player.vaultRecovery=player.vaultRecoveryDuration;
-    /* Keep the chase camera on the same landing-side orbit that was eased in
-       during the mantle. Resetting to the wall-facing yaw here made the camera
-       reverse direction on the exact frame the feet reached the top surface. */
-    if(!lowVault)targetYaw=Math.atan2(player.vaultNormal.x,player.vaultNormal.z);
+    /* Landing never writes camera yaw; the user's last mouse direction remains
+       stable across the entire climb, mantle, and roof exit. */
     landingKick=lowVault?0.2:0.32;
     /* Give the camera enough time to complete its orbit around the landing
        side before normal obstruction correction resumes. Movement remains

@@ -30,6 +30,7 @@
   @keyframes mark{0%{transform:scale(1.4)}100%{transform:scale(0.8)}}
   #hint{position:fixed;bottom:64px;width:100%;text-align:center;color:#fff;font-size:15px;letter-spacing:1px;text-shadow:0 1px 3px #000;pointer-events:none;z-index:5}
   #hint.bad{color:#ff6b5e}
+  #hint.action::before{content:'SPACE';display:inline-block;margin-right:9px;padding:3px 8px;border:1px solid rgba(255,255,255,.85);border-radius:3px;background:rgba(8,10,12,.78);box-shadow:0 1px 4px rgba(0,0,0,.55);font-size:11px;font-weight:700;letter-spacing:.7px;vertical-align:2px}
   #kill{position:fixed;bottom:14px;right:14px;color:#ffd479;background:rgba(10,12,14,.7);padding:6px 10px;border-radius:6px;font-size:12px;pointer-events:none;z-index:5}
   #load{position:fixed;inset:0;background:#0c0e10;color:#cfe8ff;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:20;font-size:14px;letter-spacing:1px}
   #load .big{font-size:22px;margin-bottom:14px;color:#fff}
@@ -40,7 +41,7 @@
 <body>
 <div id="err"></div>
 <div id="ctl">
-  <b>WASD</b> move / auto-vault short cover &nbsp;<b>SHIFT+W</b> auto-climb wall &nbsp;<b>S</b> let go &nbsp;<b>SPACE</b> jump / vault at a ledge<br>
+  <b>WASD</b> move &nbsp;<b>SHIFT</b> sprint &nbsp;<b>SHIFT+W</b> climb wall &nbsp;<b>C</b> climb down / grab ledge &nbsp;<b>S</b> let go &nbsp;<b>SPACE</b> jump / vault when prompted<br>
   <b>mouse</b> look &nbsp;<b>LMB</b> shoot (∞ ammo) &nbsp;<b>1/2/3/4</b> pistol/rifle/shotgun/RPG &nbsp;<b>M</b> audio<br>
   goal: blow everything up
 </div>
@@ -61,16 +62,16 @@
 <div id="start">CLICK TO PLAY</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="./voxel_physics.js?v=4"></script>
-<script src="./js/core.js?v=4"></script>
-<script src="./js/destruction.js?v=4"></script>
-<script src="./js/world.js?v=5"></script>
-<script src="./js/combat.js?v=5"></script>
-<script src="./js/climbing.js?v=5"></script>
-<script src="./js/player-controller.js?v=9"></script>
-<script src="./js/player-character.js?v=11"></script>
-<script src="./js/ui-effects.js?v=5"></script>
-<script src="./js/rigid-body.js?v=4"></script>
-<script src="./js/actors.js?v=4"></script>
-<script src="./js/game-loop.js?v=5"></script>
+<script src="./js/core.js?v=5"></script>
+<script src="./js/destruction.js?v=5"></script>
+<script src="./js/world.js?v=6"></script>
+<script src="./js/combat.js?v=7"></script>
+<script src="./js/climbing.js?v=8"></script>
+<script src="./js/player-controller.js?v=25"></script>
+<script src="./js/player-character.js?v=14"></script>
+<script src="./js/ui-effects.js?v=9"></script>
+<script src="./js/rigid-body.js?v=6"></script>
+<script src="./js/actors.js?v=5"></script>
+<script src="./js/game-loop.js?v=9"></script>
 </body>
 </html>

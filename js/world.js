@@ -344,12 +344,22 @@ function addActorVoxelPart(actor,name,parent,pivot,center,size,color,cell,shape)
   }
   mesh.instanceMatrix.needsUpdate=true;
   if(mesh.instanceColor)mesh.instanceColor.needsUpdate=true;
-  mesh.userData={voxelActor:actor,voxelCells:cells,voxelColors:colors,voxelCellSize:cell};
+  const partState={
+    name,holder,mesh,center:V().fromArray(center),size:V().fromArray(size),
+    detached:false,rigidRoot:null,hp:0,maxHp:0,
+    restPosition:null,restQuaternion:null,restScale:null
+  };
+  mesh.userData={
+    voxelActor:actor,actorPart:name,actorPartState:partState,
+    voxelCells:cells,voxelColors:colors,voxelCellSize:cell
+  };
+  holder.userData={voxelActor:actor,actorPart:name,actorPartState:partState};
   holder.add(mesh);actor.voxelMeshes.push(mesh);actor.parts[name]=holder;
+  actor.partStates[name]=partState;
   return holder;
 }
 function buildVoxelHumanoid(group,palette,dummy){
-  const actor={group,voxelMeshes:[],parts:{}};
+  const actor={group,voxelMeshes:[],parts:{},partStates:{},rigidBody:null};
   const cell=dummy?0.105:0.11;
   addActorVoxelPart(actor,'torso',group,[0,1.18,0],[0,0,0],
     dummy?[0.44,0.78,0.3]:[0.56,0.78,0.36],palette.torso,cell,'box');
@@ -371,31 +381,24 @@ function buildVoxelHumanoid(group,palette,dummy){
   }else{
     actor.parts.leftArm.rotation.z=-0.42;actor.parts.rightArm.rotation.z=0.42;
   }
+  for(const state of Object.values(actor.partStates)){
+    state.restPosition=state.holder.position.clone();
+    state.restQuaternion=state.holder.quaternion.clone();
+    state.restScale=state.holder.scale.clone();
+  }
   return actor;
 }
-const actorBurstWorld=V(),actorBurstDir=V(),actorBurstVelocity=V();
-function burstVoxelActor(actor,epicenter,force){
-  if(!actor||!actor.group||actor.group.visible===false)return;
-  actor.group.updateMatrixWorld(true);
-  const centre=epicenter||actor.group.position;
-  for(const mesh of actor.voxelMeshes){
-    const cells=mesh.userData.voxelCells,colors=mesh.userData.voxelColors;
-    for(let i=0;i<cells.length;i++){
-      actorBurstWorld.copy(cells[i]).applyMatrix4(mesh.matrixWorld);
-      actorBurstDir.subVectors(actorBurstWorld,centre);
-      if(actorBurstDir.lengthSq()<0.002)
-        actorBurstDir.set(Math.random()-0.5,Math.random()*0.7+0.2,Math.random()-0.5);
-      actorBurstDir.normalize();
-      actorBurstVelocity.copy(actorBurstDir).multiplyScalar((force||6)*(0.48+Math.random()*0.58));
-      actorBurstVelocity.y+=1.5+Math.random()*2.5;
-      voxelPhysics.emitDebris(actorBurstWorld,actorBurstVelocity,
-        mesh.userData.voxelCellSize*0.92,colors[i]);
-    }
-  }
-  actor.group.visible=false;
+function actorTargetMeshes(actor){
+  if(!actor||!actor.voxelMeshes)return [];
+  return actor.voxelMeshes.filter(mesh=>{
+    const state=mesh.userData&&mesh.userData.actorPartState;
+    return !state||!state.detached;
+  });
 }
 function actorContainsMesh(actor,mesh){
-  return !!(actor&&actor.voxelMeshes&&actor.voxelMeshes.indexOf(mesh)>=0);
+  if(!actor||!actor.voxelMeshes||actor.voxelMeshes.indexOf(mesh)<0)return false;
+  const state=mesh&&mesh.userData&&mesh.userData.actorPartState;
+  return !state||!state.detached;
 }
 function makeEnemy(x,z){
   const g=new THREE.Group();
@@ -405,7 +408,8 @@ function makeEnemy(x,z){
   },false);
   scene.add(g);
   const e=Object.assign(actor,{
-    pos:V(x,0,z),vel:V(),hp:50,alive:true,
+    actorKind:'enemy',pos:V(x,0,z),spawnPos:V(x,0,z),vel:V(),
+    hp:50,maxHp:50,alive:true,disarmed:false,
     state:'patrol',target:0,
     cooldown:0,
     path:[V(x+8,0,z),V(x-8,0,z+6),V(x+4,0,z-4)],
@@ -424,7 +428,10 @@ function makeDummy(x,z){
     torso:0x9b6b3e,head:0x5b3b24,arm:0x8d5d34,leg:0x654326,gun:0x444a52
   },true);
   scene.add(g);
-  const d=Object.assign(actor,{pos:V(x,0,z),hp:20,alive:true,respawn:0,tilt:0});
+  const d=Object.assign(actor,{
+    actorKind:'dummy',pos:V(x,0,z),spawnPos:V(x,0,z),
+    hp:20,maxHp:20,alive:true,disarmed:false,respawn:0,tilt:0
+  });
   for(const mesh of d.voxelMeshes)mesh.userData.voxelActor=d;
   dummies.push(d);
 }

@@ -178,7 +178,7 @@ function getCameraStaticBoxCandidates(pos){
 }
 
 const playerStaticBoxCandidates=[];
-function getPlayerStaticBoxCandidates(){
+function getStaticBoxCandidatesAt(position,queryReach){
   if(staticBoxGridDirty)rebuildStaticBoxGrid();
   playerStaticBoxCandidates.length=0;
   let stamp=++staticBoxGridStamp;
@@ -186,11 +186,11 @@ function getPlayerStaticBoxCandidates(){
   /* The player is a small expanded cylinder. Query only the grid cells around
      that footprint; the old full `boxes` scan became needlessly expensive once
      a fractured building had hundreds of static cells in the scene. */
-  const reach=0.78;
-  const minX=Math.floor((player.pos.x-reach)/STATIC_BOX_GRID_CELL);
-  const maxX=Math.floor((player.pos.x+reach)/STATIC_BOX_GRID_CELL);
-  const minZ=Math.floor((player.pos.z-reach)/STATIC_BOX_GRID_CELL);
-  const maxZ=Math.floor((player.pos.z+reach)/STATIC_BOX_GRID_CELL);
+  const reach=queryReach===undefined?0.78:Math.max(0.78,queryReach);
+  const minX=Math.floor((position.x-reach)/STATIC_BOX_GRID_CELL);
+  const maxX=Math.floor((position.x+reach)/STATIC_BOX_GRID_CELL);
+  const minZ=Math.floor((position.z-reach)/STATIC_BOX_GRID_CELL);
+  const maxZ=Math.floor((position.z+reach)/STATIC_BOX_GRID_CELL);
   const append=box=>{
     if(box.active===false)return;
     if(box._staticGridStamp===stamp)return;
@@ -203,6 +203,9 @@ function getPlayerStaticBoxCandidates(){
   }
   for(const box of staticBoxGridLarge)append(box);
   return playerStaticBoxCandidates;
+}
+function getPlayerStaticBoxCandidates(queryReach){
+  return getStaticBoxCandidatesAt(player.pos,queryReach);
 }
 
 function updateChunkAxes(body){
@@ -507,7 +510,12 @@ function staticizeChunk(c){
   if(ci<0)return false;
   c.updateMatrixWorld(true);
   const ud=c.userData;
-  const staticBox=box3Of(c);
+  /* Instanced voxel actors keep their collision envelope on the rigid root.
+     Box3 cannot see the per-instance offsets in this Three.js revision, so
+     preserve the solver's exact last OBB bounds when a body or limb sleeps. */
+  const staticBox=ud.actorRigid
+    ?new THREE.Box3(V(ud.minX,ud.minY,ud.minZ),V(ud.maxX,ud.maxY,ud.maxZ))
+    :box3Of(c);
   staticBox.owner=c;
   ud.fractureBox=staticBox;ud.staticFragment=true;ud.sleeping=true;
   ud.restFrames=0;
@@ -924,7 +932,8 @@ function resolveStaticBoxes(body){
     const ownerData=owner&&owner.userData;
     const oriented=ownerData&&(ownerData.kind==='cell'||ownerData.kind==='roof'||
       ownerData.kind==='trim'||ownerData.kind==='groupShell'||
-      ownerData.kind==='groupChunk')&&ownerData.size;
+      ownerData.kind==='groupChunk'||ownerData.kind==='actorBody'||
+      ownerData.kind==='actorPart')&&ownerData.size;
     if(oriented){
       /* The broadphase uses the cached AABB, but the narrowphase must use the
          actual piece frame. This keeps a rotated roof, wall fragment, or
