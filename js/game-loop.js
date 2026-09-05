@@ -58,6 +58,7 @@ function update(dt){
   if(!Number.isFinite(dt)||dt<=0)return;
   const elapsed=Math.min(dt,SIMULATION_STEP*SIMULATION_MAX_STEPS);
   simulationAccumulator+=elapsed;
+  const simulationDeadline=performance.now()+SIMULATION_CPU_BUDGET_MS;
   let steps=0;
   while(simulationAccumulator+1e-10>=SIMULATION_STEP&&steps<SIMULATION_MAX_STEPS){
     previousPlayerPosition.copy(player.pos);
@@ -65,6 +66,15 @@ function update(dt){
     simulate(SIMULATION_STEP);
     simulationAccumulator=Math.max(0,simulationAccumulator-SIMULATION_STEP);
     steps++;simulationTicks++;
+    /* A collapse must not turn one expensive tick into twelve before showing
+       the next frame. Always finish each fixed tick, then yield presentation
+       after the CPU budget. Discard overdue whole ticks so overload cannot
+       bank a burst of movement/fire or keep stalling after the rubble rests. */
+    if(simulationAccumulator+1e-10>=SIMULATION_STEP&&performance.now()>=simulationDeadline){
+      const overdue=Math.floor((simulationAccumulator+1e-10)/SIMULATION_STEP);
+      simulationAccumulator=Math.max(0,simulationAccumulator-overdue*SIMULATION_STEP);
+      break;
+    }
   }
   voxelPhysics.syncVisuals();
   updateHint(elapsed);

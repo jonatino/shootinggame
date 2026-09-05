@@ -10,7 +10,9 @@
     "test:browser": "node --test --test-concurrency=1 tests/browser.test.cjs",
     "test:stress": "node --test --test-concurrency=1 tests/stress.test.cjs",
     "test:all": "node tests/run-all.cjs",
-    "test:bench": "node tests/benchmark.cjs"
+    "test:bench": "node tests/benchmark.cjs",
+    "test:collapse-perf": "node tests/collapse-performance.cjs",
+    "test:rapid-fire-perf": "node tests/rapid-fire-performance.cjs"
   },
   "devDependencies": {
     "playwright-core": "1.62.1",

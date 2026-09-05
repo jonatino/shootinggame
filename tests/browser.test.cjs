@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {openGamePage} = require('./support/browser-runtime.cjs');
+require('./browser-collapse.test.cjs');
 
 test('browser loads, renders, and gates paused input behind the play screen', async t => {
   const runtime = await openGamePage();

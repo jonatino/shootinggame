@@ -21,7 +21,9 @@ for(const y of [5.3,5.9])test(`a fragment at height ${y} slides off a continuous
 test('a fragment settles on a real ledge and falls when that support is shot away',()=>{
   const runtime=createRuntime({seed:931});
   const result=runtime.json(`(()=>{
-    const ledge=voxelPhysics.registerBuilding({x:0,y:2,z:0,width:3,height:4,depth:3,
+    // A narrow ledge isolates loss of support from the shot's secondary rubble
+    // impacts and from landing back on neighboring, unbroken top cells.
+    const ledge=voxelPhysics.registerBuilding({x:0,y:2,z:0,width:0.4,height:4,depth:0.4,
       voxelSize:1,shape:'solid',simulateLoads:false});
     voxelPhysics.emitDebris(V(0,4.4,0),V(),0.35);
     const m=new THREE.Matrix4();

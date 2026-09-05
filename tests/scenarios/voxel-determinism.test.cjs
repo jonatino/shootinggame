@@ -186,7 +186,7 @@ test('fast loose voxels cannot tunnel through an intact voxel wall', () => {
   const result = runtime.json(String.raw`(()=>{
     const wall=voxelPhysics.registerBuilding({
       x:0,y:1,z:0,width:0.5,height:2,depth:2,voxelSize:0.5,
-      shape:'solid',color:0x999999,simulateLoads:false
+      shape:'solid',cellType:1,color:0x999999,simulateLoads:false
     });
     voxelPhysics.emitDebris(new THREE.Vector3(-1,1,0),
       new THREE.Vector3(30,0,0),0.35,new THREE.Color(0.7,0.6,0.5));

@@ -3,13 +3,15 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const {createRuntime}=require('../support/game-runtime.cjs');
+const {createVoxelRuntime}=require('../support/voxel-runtime.cjs');
 
 test('swept loose fragments hit a 2 cm wall at 240 m/s and preserve nearby misses',()=>{
   for(const z of [0,1.3]){
     const runtime=createRuntime({seed:901});
     const result=runtime.json(`(()=>{
       const wall=voxelPhysics.registerBuilding({x:0,y:1,z:0,
-        width:0.02,height:2,depth:2,voxelSize:0.5,shape:'solid',simulateLoads:false});
+        width:0.02,height:2,depth:2,voxelSize:0.5,shape:'solid',
+        strength:1e9,simulateLoads:false}); // Isolate collision from impact fracture.
       voxelPhysics.emitDebris(V(-1,1,${z}),V(240,0,0),0.08);
       voxelPhysics.update(1/120);
       const m=new THREE.Matrix4();voxelPhysics.debrisMesh.getMatrixAt(0,m);
@@ -54,23 +56,22 @@ test('ground friction slows rubble by contact force instead of deleting sliding 
 });
 
 test('removing the support of a quiet rubble pile wakes its dependent fragments',()=>{
-  const runtime=createRuntime({seed:904});
+  const runtime=createVoxelRuntime({seed:904});
   const result=runtime.json(`(()=>{
     const base=new THREE.Mesh(new THREE.BoxGeometry(4,1,4),new THREE.MeshBasicMaterial());
     base.position.set(0,2,0);base.userData={half:V(2,0.5,2),position:base.position,
       vel:V(),angVel:V(),invMass:0,sleeping:true};settledFragments.push(base);
-    const read=()=>{const m=new THREE.Matrix4(),out=[];
-      for(let i=0;i<voxelPhysics.stats().debris;i++){
-        voxelPhysics.debrisMesh.getMatrixAt(i,m);out.push(m.elements[13]);
-      }return out;};
-    voxelPhysics.emitDebris(V(0,3.1,0),V(),0.6);
-    for(let i=0;i<120;i++)voxelPhysics.update(1/120);
-    voxelPhysics.emitDebris(V(0,read()[0]+1.1,0),V(),0.6);
-    for(let i=0;i<180;i++)voxelPhysics.update(1/120);
+    const read=()=>subject.debrisState().map(b=>b.position[1]);
+    subject.emitDebris(V(0,3.1,0),V(),0.6);
+    subject.setDebrisPose(0,[0,0,0,1]);
+    for(let i=0;i<120;i++)subject.update(1/120);
+    subject.emitDebris(V(0,read()[0]+1.1,0),V(),0.6);
+    subject.setDebrisPose(1,[0,0,0,1]);
+    for(let i=0;i<180;i++)subject.update(1/120);
     const settled=read();
-    for(let i=0;i<30;i++)voxelPhysics.update(1/120);
+    for(let i=0;i<30;i++)subject.update(1/120);
     const quiet=read();base.position.x=20;
-    for(let i=0;i<48;i++)voxelPhysics.update(1/120);
+    for(let i=0;i<48;i++)subject.update(1/120);
     return {settled,quiet,fallen:read()};
   })()`);
   assert.equal(result.quiet.length,2);

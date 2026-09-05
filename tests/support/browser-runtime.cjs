@@ -21,7 +21,7 @@ function findBrowserExecutable() {
   return executable;
 }
 
-async function openGamePage() {
+async function openGamePage({seed,voxelSourcePath,gameLoopSourcePath,scriptSourceRoot}={}) {
   const server = await startStaticServer(projectRoot);
   let browser;
   try {
@@ -33,6 +33,10 @@ async function openGamePage() {
     /* This applies to every page/frame and every navigation, before game code.
        Never permit a test to call native pointer lock, including headless runs. */
     await context.addInitScript({path:path.join(projectRoot,'tests','browser','input-safety.js')});
+    if(seed!==undefined)await context.addInitScript(seed=>{
+      let value=seed>>>0;
+      Math.random=()=>{value=(Math.imul(value,1664525)+1013904223)>>>0;return value/4294967296;};
+    },seed);
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
@@ -43,6 +47,20 @@ async function openGamePage() {
     await page.route('https://cdnjs.cloudflare.com/**/three.min.js', route => route.fulfill({
       path: localThree,
       contentType: 'text/javascript; charset=utf-8'
+    }));
+    if(scriptSourceRoot)await page.route(`${server.origin}/**/*.js*`,route=>{
+      const root=path.resolve(scriptSourceRoot);
+      const file=path.resolve(root,new URL(route.request().url()).pathname.slice(1));
+      if(file.startsWith(root+path.sep)&&fs.existsSync(file))return route.fulfill({
+        path:file,contentType:'text/javascript; charset=utf-8'
+      });
+      return route.continue();
+    });
+    if(voxelSourcePath)await page.route('**/voxel_physics.js*',route=>route.fulfill({
+      path:path.resolve(voxelSourcePath),contentType:'text/javascript; charset=utf-8'
+    }));
+    if(gameLoopSourcePath)await page.route('**/js/game-loop.js*',route=>route.fulfill({
+      path:path.resolve(gameLoopSourcePath),contentType:'text/javascript; charset=utf-8'
     }));
     const startedAt = performance.now();
     await page.goto(`${server.origin}/index.html`, {waitUntil: 'domcontentloaded'});

@@ -771,7 +771,8 @@ function damageStructureFromBullet(dObj,mesh,point,dir,w,normal){
     const power=w.structuralPower!==undefined?w.structuralPower:
       (w.name==='SHOTGUN'?0.72:(w.name==='RIFLE'?0.34:0.18));
     const broke=meshData&&meshData.voxelChunk
-      ?voxelPhysics.damageChunk(mesh,dir,power*3)
+      ?voxelPhysics.damageChunk(mesh,dir,power*3,point,
+        w.structurePenetration,w.structureRadius,w.structureCells)
       :(w.structurePenetration!==undefined&&voxelPhysics.damagePath
         ?voxelPhysics.damagePath(dObj.voxelStructure,point,dir,power,
           w.structurePenetration,w.structureRadius,w.structureCells)
@@ -831,7 +832,7 @@ function damageStructureFromImpact(dObj,mesh,point,strength,normal){
   if(dObj.voxelManaged){
     const meshData=mesh&&mesh.userData;
     if(meshData&&meshData.voxelChunk)
-      return voxelPhysics.damageChunk(mesh,normal||UP,Math.min(6,strength*0.2));
+      return voxelPhysics.damageChunk(mesh,normal||UP,Math.min(6,strength*0.2),point);
     return voxelPhysics.damageAt(dObj.voxelStructure,point,
       Math.min(1.2,strength*0.13),normal||UP);
   }

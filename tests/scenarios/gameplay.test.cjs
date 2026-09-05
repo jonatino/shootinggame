@@ -49,6 +49,27 @@ test('releasing the trigger never banks a burst for the next click',()=>{
   assert.deepEqual(result,{idle:0,first:1,repeated:1});
 });
 
+test('expensive physics yields a rendered frame without banking overdue simulation ticks',()=>{
+  for(const [frameTime,stepCost] of [[0.1,6],[1/30,6],[0.025,12]]){
+    const runtime=createRuntime({gameplay:true,seed:1106});
+    const result=runtime.json(`(()=>{
+      const originalSimulate=simulate,tickSizes=[];let expensive=true;
+      simulate=function(dt){
+        tickSizes.push(dt);originalSimulate(dt);
+        if(expensive)__testClock.advance(${stepCost}); // Deterministic CPU cost, no wall-clock assertion.
+      };
+      update(${frameTime});const overloaded=simulationTicks;
+      const remainder=simulationAccumulator;
+      expensive=false;update(1/60);
+      return {overloaded,recovered:simulationTicks-overloaded,remainder,tickSizes};
+    })()`);
+    assert.equal(result.overloaded,Math.ceil(8/stepCost),'yield after the synthetic work budget');
+    assert.equal(result.recovered,2,'the following frame must not inherit a catch-up burst');
+    assert.ok(result.remainder<1/120);
+    assert.ok(result.tickSizes.every(dt=>dt===1/120),'keep the fixed physics timestep');
+  }
+});
+
 test('enemy bullets sweep the full player capsule and respect nearer cover',()=>{
   const runtime=createRuntime({gameplay:true,seed:613});
   const result=runtime.json(`(()=>{

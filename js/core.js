@@ -108,6 +108,7 @@ const UP=V(0,1,0), DOWN=V(0,-1,0);
 const WORLD_GRAVITY=9.81;
 const SIMULATION_STEP=1/120;
 const SIMULATION_MAX_STEPS=12;
+const SIMULATION_CPU_BUDGET_MS=8;
 
 /* Prefer a discrete/high-performance adapter for the dense instanced skyline.
    The game is fully opaque and never uses stencil operations, so do not ask
