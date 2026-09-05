@@ -17,10 +17,6 @@
   #cross::before,#cross::after{content:'';position:absolute;background:rgba(255,210,140,.85);box-shadow:0 0 3px #000}
   #cross::before{left:50%;top:0;width:2px;height:100%;margin-left:-1px}
   #cross::after{top:50%;left:0;height:2px;width:100%;margin-top:-1px}
-  #cross.recoil-a{animation:crossRecoilA 0.14s ease-out}
-  #cross.recoil-b{animation:crossRecoilB 0.14s ease-out}
-  @keyframes crossRecoilA{0%{transform:scale(1.6)}100%{transform:scale(1)}}
-  @keyframes crossRecoilB{0%{transform:scale(1.6)}100%{transform:scale(1)}}
   #lowhp{position:fixed;inset:0;pointer-events:none;z-index:7;opacity:0;transition:opacity .5s;background:radial-gradient(ellipse at center,transparent 55%,rgba(180,20,20,.55) 100%)}
   #lowhp.pulse{animation:lphp 0.9s ease-in-out infinite}
   @keyframes lphp{0%,100%{opacity:.55}50%{opacity:.95}}
@@ -122,10 +118,10 @@
 <script src="./js/core.js?v=11"></script>
 <script src="./js/destruction.js?v=5"></script>
 <script src="./js/world.js?v=8"></script>
-<script src="./js/combat.js?v=15"></script>
+<script src="./js/combat.js?v=16"></script>
 <script src="./js/climbing.js?v=10"></script>
-<script src="./js/player-controller.js?v=39"></script>
-<script src="./js/player-character.js?v=23"></script>
+<script src="./js/player-controller.js?v=40"></script>
+<script src="./js/player-character.js?v=24"></script>
 <script src="./js/ui-effects.js?v=14"></script>
 <script src="./js/rigid-body.js?v=8"></script>
 <script src="./js/actors.js?v=8"></script>

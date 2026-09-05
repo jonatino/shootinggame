@@ -1052,7 +1052,7 @@ function updateGuy(dt){
      const movementWeaponPush=(walking?forwardLoad*0.018:0)-accelForward*0.018;
     gunGroup.position.x=dampValue(gunGroup.position.x,profile.mount[0]+swayX+sprintX+movementWeaponSway,16,dt);
     gunGroup.position.y=dampValue(gunGroup.position.y,profile.mount[1]+swayY+sprintY-movementWeaponDip+
-      Math.abs(camPitchKick)*0.025+landingKick*0.025+recoilLoad*0.014,16,dt);
+      landingKick*0.025+recoilLoad*0.014,16,dt);
     gunGroup.position.z=dampValue(gunGroup.position.z,profile.mount[2]+recoilZ+sprintZ+swayZ-movementWeaponPush,16,dt);
     const weaponAimYaw=Math.max(-1.35,Math.min(1.35,aimYaw));
     /* Weapon meshes point along local -Z and are yawed 180° onto the
@@ -1065,7 +1065,7 @@ function updateGuy(dt){
     gunGroup.rotation.y=dampAngle(gunGroup.rotation.y,weaponAimYaw+Math.PI,18,dt);
     gunGroup.rotation.x=dampValue(gunGroup.rotation.x,weaponAimPitch,18,dt);
     gunGroup.rotation.z=dampValue(gunGroup.rotation.z,swayRoll-weaponSprint*0.18-
-      sideLoad*0.035+turnLoad*0.04+camYawKick*0.5+recoilRoll*0.8,16,dt);
+      sideLoad*0.035+turnLoad*0.04+recoilRoll*0.8,16,dt);
     gunGroup.scale.setScalar(dampValue(gunGroup.scale.x,1,16,dt));
   }
 
@@ -1547,11 +1547,6 @@ function updateCam(dt){
   camTmp3.y+=0.25;
   camTmp3.z-=Math.sin(camYaw)*0.55;
   camera.lookAt(camTmp3);
-  camera.rotation.x+=camPitchKick*motion;
-  camera.rotation.y+=camYawKick*motion;
-  camPitchKick*=Math.exp(-dt*8);
-  camYawKick*=Math.exp(-dt*8);
-  camFovKick=Math.max(0,camFovKick-dt*8);
   /* game-loop deliberately clears the sprint flag while a vault owns root
      motion. Preserve the FOV contribution from the entry velocity so a fast
      manual vault does not visibly zoom inward at takeoff and back out at the
@@ -1561,7 +1556,7 @@ function updateCam(dt){
   const lowVaultFovBlend=lowVaultFovActive?Math.max(0,Math.min(1,
     (player.vaultEntrySpeed-PLAYER_WALK_SPEED)/
     Math.max(0.01,PLAYER_SPRINT_SPEED-PLAYER_WALK_SPEED))):0;
-  const baseFov=75+(Math.max(sprintCameraBlend,lowVaultFovBlend)*8+camFovKick)*motion;
+  const baseFov=75+Math.max(sprintCameraBlend,lowVaultFovBlend)*8*motion;
   curFov+=(baseFov-curFov)*(1-Math.exp(-8*dt));
   if(camera.fov!==curFov){
     camera.fov=curFov;

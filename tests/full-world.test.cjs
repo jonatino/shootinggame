@@ -299,7 +299,7 @@ test('full authored world cooks on the CPU without rendering', () => {
       player.pos.set(90,0,90);player.vel.set(0,0,0);
       player.mode='ground';player.onGround=true;player.vaultRecovery=0;
       camYaw=0.48;targetYaw=camYaw;camPitch=0.22;targetPitch=camPitch;
-      camPitchKick=0;camYawKick=0;camShake=0;
+      camShake=0;
       const strafe=new THREE.Vector3(direction,0,0);
       for(let i=0;i<120;i++){
         groundStep(1/120,strafe);
@@ -323,7 +323,7 @@ test('full authored world cooks on the CPU without rendering', () => {
     player.pos.set(-80,0,-80);player.vel.set(0,0,0);
     player.mode='ground';player.onGround=true;player.vaultRecovery=0;
     camYaw=0;targetYaw=0;camPitch=0.2;targetPitch=0.2;
-    camPitchKick=0;camYawKick=0;camShake=0;heldDist=5.6*camZoom;
+    camShake=0;heldDist=5.6*camZoom;
     const idle=new THREE.Vector3(),strafe=new THREE.Vector3(1,0,0);
     for(let i=0;i<120;i++){
       groundStep(1/120,idle);

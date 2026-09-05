@@ -27,12 +27,11 @@ const PLAYER_STEP_HEIGHT=0.42,PLAYER_STEP_MIN_RISE=0.035;
 let camYaw=0.72,camPitch=0.27,camShake=0;
 let targetYaw=camYaw,targetPitch=camPitch,curFov=75;
 const CAMERA_PITCH_MIN=-0.42,CAMERA_PITCH_MAX=1.25;
-let sprinting=false,camPitchKick=0,camYawKick=0,camFovKick=0;
+let sprinting=false;
 let moveSpeed=0,camZoom=1,heldDist=5.6;
 /* Fire-rate cooldown and physical recoil are separate signals. Cooldown says
    when the weapon may fire again; recoil is a short impulse shared by the
-   stock, shoulders, torso, and muzzle so automatic fire does not leave the
-   body frozen while only the crosshair twitches. */
+   stock, shoulders, torso, and muzzle. The crosshair and camera stay steady. */
 const weaponRecoilProfiles={
   PISTOL:{load:0.34,pitch:0.045,roll:0.014},
   RIFLE:{load:0.24,pitch:0.032,roll:0.011},
@@ -336,7 +335,7 @@ function respawnPlayer(){
   player.jumpClimbActive=false;player.jumpLaunchY=0;player.climbDir.set(0,0,0);
   landingKick=0;walkAmt=0;moveSpeed=0;movementAccel=0;movementAccelWorld.set(0,0,0);
   weaponRecoilKick=0;weaponRecoilPitch=0;weaponRecoilRoll=0;
-  camShake=0;camPitchKick=0;camYawKick=0;camFovKick=0;
+  camShake=0;
   player.pos.y=groundBelow(player.pos.x,player.pos.z,12);
   resolveColliders();
   flashHint('RESPAWNED — back in the fight');

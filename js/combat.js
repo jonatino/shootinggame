@@ -12,7 +12,7 @@ const WEAPONS={
     dmg:110,rof:0.028,spread:0.003,automatic:true,
     structuralPower:2.65,structureDamage:12,cellDamage:12,cellThreshold:4.2,
     structurePenetration:3.2,structureRadius:0.66,structureCells:8,
-    debrisKick:4.8,impactForce:15,cameraKick:0.009,tracerScale:1.55,
+    debrisKick:4.8,impactForce:15,tracerScale:1.55,
     impactColor:0xffb34d}
 };
 const playerWpn={cur:'cannon',cooldown:0,shotSerial:0};
@@ -919,16 +919,6 @@ function shoot(){
   weaponRecoilRoll=Math.max(-0.14,Math.min(0.14,
     weaponRecoilRoll+(Math.random()-0.5)*recoil.roll));
   if(weaponShotSounds[w.name])weaponShotSounds[w.name]();
-  const kickAmp=w.cameraKick!==undefined?w.cameraKick:
-    (w.projectile==='rocket'?0.05:(w.name==='SHOTGUN'?0.055:(w.name==='RIFLE'?0.028:0.035)));
-  camPitchKick+=kickAmp;
-  camFovKick=Math.max(camFovKick,2.5);
-  const crossEl=document.getElementById('cross');
-  /* Alternate identical animation names to restart recoil without a forced
-     synchronous layout. That reflow landed directly in every cannon frame. */
-  const recoilClass=playerWpn.shotSerial&1?'recoil-a':'recoil-b';
-  crossEl.classList.remove(recoilClass==='recoil-a'?'recoil-b':'recoil-a');
-  crossEl.classList.add(recoilClass);
   /* Fire from the rendered muzzle so the projectile, flash, and weapon stay aligned. */
   const start=shotStart.fromArray(weaponMuzzlePoints[playerWpn.cur]||weaponMuzzlePoints.rpg);
   guy.updateMatrixWorld(true);
@@ -946,8 +936,7 @@ function shoot(){
   const pellets=w.pellets||1;
   for(let p=0;p<pellets;p++){
     /* Keep one shotgun pellet exactly on the reticle; the remaining pellets
-       describe the cone around it. Pistol and rifle rounds are fully centred,
-       with visible camera recoil supplying their accuracy cost. */
+       describe the cone around it. Pistol and rifle rounds are fully centred. */
     const spreadAmount=pellets>1&&p===0?0:w.spread;
     const dir=spreadShotDirection(camDir,spreadAmount,shotRayDir);
     rc.set(start,dir);rc.far=SHOT_MAX_DISTANCE;rc.near=0;
