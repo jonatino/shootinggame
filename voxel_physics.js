@@ -1834,16 +1834,11 @@ root.createVoxelDestructionEngine=function createVoxelDestructionEngine(options)
     let penetration=overlapX,nx=dx>=0?1:-1,ny=0,nz=0;
     if(overlapY<penetration){penetration=overlapY;nx=0;ny=dy>=0?1:-1;nz=0;}
     if(overlapZ<penetration){penetration=overlapZ;nx=0;ny=0;nz=dz>=0?1:-1;}
-    /* Two multi-cell bodies can overlap far enough that the colliding cell
-       centres have crossed. The body centres still identify the separating
-       side, preventing the solver from pulling whole slabs farther together. */
-    if(a.kind!==0&&b.kind!==0){
-      const ap=a.kind===1?a.chunk.mesh.position:a.body.position;
-      const bp=b.kind===1?b.chunk.mesh.position:b.body.position;
-      if(nx)nx=bp.x>=ap.x?1:-1;
-      else if(ny)ny=bp.y>=ap.y?1:-1;
-      else nz=bp.z>=ap.z?1:-1;
-    }
+    /* Use the touching cells to choose the separating side. A hollow shell
+       can surround its core, and detached floors can interlock with walls:
+       their body centres do not identify which side of a surface is solid.
+       Flipping this normal by body centre pushed the core through the facade
+       on every solver pass, even with no outward velocity. */
     if(a.kind===0&&b.kind===0){
       dynamicImmediateContact.a=a;dynamicImmediateContact.b=b;
       dynamicImmediateContact.penetration=penetration;

@@ -72,6 +72,9 @@ add linear and angular impulses. Changing a spin axis never reapplies accumulate
 rotation to the original pose. Static contacts project out the overlapping surface
 and apply impulses and bounded friction while preserving tangential motion.
 Touching a vertical wall cannot roll back the section's falling displacement.
+Contacts between detached sections use the colliding cells to choose the contact
+normal. Whole-body centres cannot identify the solid side of hollow shells or
+interlocking floors; using them reversed contacts and ejected building cores.
 
 ## Controls and preferences
 

@@ -10,3 +10,4 @@ require('./scenarios/gameplay.test.cjs');
 require('./scenarios/physics-refinement.test.cjs');
 require('./scenarios/voxel-chunk-motion.test.cjs');
 require('./scenarios/voxel-debris-support.test.cjs');
+require('./scenarios/voxel-structure-contact.test.cjs');

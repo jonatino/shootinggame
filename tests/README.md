@@ -51,6 +51,11 @@ and their removal, fast downward wall contacts, gravity of a colliding airborne
 rubble cloud, and detached sections sliding down vertical walls. These use only
 the CPU harness and check motion and support rather than elapsed real time.
 
+Structural contact regressions put a core against the inside of a hollow shell
+and replay a cannon burst into the brick house's footing. They check the contact
+direction, conservation of the centre of mass, and per-tick correction distance
+so an interlocking core cannot be pushed out through its surrounding facade.
+
 Browser checks exercise both denied and simulated pointer lock, actual settings
 controls, Escape, focus loss, and rendering. They save menu and game screenshots
 under `test-results/`. Stress timings exclude WebGL/GPU work and deliberately have
