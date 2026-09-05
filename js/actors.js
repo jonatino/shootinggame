@@ -39,7 +39,6 @@ function removeActorRigidRoot(root){
     const boxIndex=boxes.indexOf(box);
     if(boxIndex>=0)boxes.splice(boxIndex,1);
     root.userData.fractureBox=null;
-    staticBoxGridDirty=true;
   }
   removeOccluder(root);
   index=standables.indexOf(root);
@@ -198,7 +197,7 @@ function damageVoxelActorFromBlast(actor,epicenter,damage,force){
     candidates.push({state,distance:centre.distanceToSquared(epicenter)});
   }
   candidates.sort((a,b)=>a.distance-b.distance);
-  const detachCount=damage>=80?4:(damage>=35?2:(damage>=8?1:0));
+  const detachCount=damage>=80?4:(damage>=50?2:(damage>=35?1:0));
   const detached=[];
   for(let i=0;i<Math.min(detachCount,candidates.length);i++){
     const state=candidates[i].state;
@@ -246,9 +245,45 @@ function resetVoxelActor(actor){
   actor.group.updateMatrixWorld(true);
 }
 
+const enemyWalkDirection=V(),enemyMotionBefore=V(),enemyMotionExpected=V();
+const enemyContact=V(),enemyBoxCenter=V(),enemyBoxHalf=V();
+const enemyBoxAxes=[V(1,0,0),V(0,1,0),V(0,0,1)];
+function moveEnemyBody(enemy,dt){
+  const velocity=enemy.vel;
+  const speed=Math.hypot(velocity.x+enemyWalkDirection.x*2.2,
+    velocity.y,velocity.z+enemyWalkDirection.z*2.2);
+  const steps=Math.max(1,Math.min(24,Math.ceil(speed*dt/0.14)));
+  const step=dt/steps;
+  for(let i=0;i<steps;i++){
+    enemyMotionBefore.copy(enemy.pos);
+    enemy.pos.x+=(enemyWalkDirection.x*2.2+velocity.x)*step;
+    enemy.pos.z+=(enemyWalkDirection.z*2.2+velocity.z)*step;
+    enemy.pos.y+=velocity.y*step-0.5*WORLD_GRAVITY*step*step;
+    velocity.y-=WORLD_GRAVITY*step;
+    const floor=groundBelow(enemy.pos.x,enemy.pos.z,enemyMotionBefore.y+0.04,
+      enemyMotionBefore.y+0.08);
+    if(enemy.pos.y<=floor){enemy.pos.y=floor;velocity.y=0;}
+    enemyMotionExpected.copy(enemy.pos);
+    for(const box of getStaticBoxCandidatesAt(enemy.pos,0.5)){
+      if(enemy.pos.y+1.65<box.min.y||enemy.pos.y+0.2>box.max.y)continue;
+      box.getCenter(enemyBoxCenter);box.getSize(enemyBoxHalf).multiplyScalar(0.5);
+      pushPositionFromObb(enemy.pos,enemyBoxCenter,enemyBoxHalf,enemyBoxAxes,0.3);
+    }
+    voxelPhysics.pushPlayer(enemy.pos,0.3);
+    enemyContact.subVectors(enemy.pos,enemyMotionExpected).setY(0);
+    if(enemyContact.lengthSq()>1e-8){
+      enemyContact.normalize();
+      const into=velocity.dot(enemyContact);
+      if(into<0)velocity.addScaledVector(enemyContact,-into);
+    }
+  }
+  const drag=Math.exp(-(velocity.y===0?5:0.12)*dt);
+  velocity.x*=drag;velocity.z*=drag;
+}
 function updateEnemies(dt){
   for(const e of enemies){
     if(!e.alive)continue;
+    enemyWalkDirection.set(0,0,0);
     let moving=false;
     e.cooldown=Math.max(0,e.cooldown-dt);
     e.recoil=Math.max(0,e.recoil-dt*4);
@@ -260,20 +295,24 @@ function updateEnemies(dt){
     let blocked=false;
     if(seePlayer){
       enemyRayOrigin.set(e.pos.x,e.pos.y+1.5,e.pos.z);
-      enemyRayDir.copy(toPlayer);
+      enemyRayDir.set(player.pos.x,player.pos.y+1.0,player.pos.z).sub(enemyRayOrigin);
+      const sightDistance=enemyRayDir.length();
+      enemyRayDir.normalize();
       rc.set(enemyRayOrigin,enemyRayDir);
-      rc.far=dist;rc.near=0.1;
-      const hits=rc.intersectObjects(occluders,false);
-      if(hits.length&&hits[0].distance<dist-1)blocked=true;
+      rc.far=Math.max(0,sightDistance-0.05);rc.near=0.1;
+      enemySightHits.length=0;
+      const hits=rc.intersectObjects(getCameraOccluderCandidates(
+        enemyRayOrigin,enemyRayDir,sightDistance),false,enemySightHits);
+      blocked=hits.length>0;
     }
     if(seePlayer&&!blocked){
       e.state='attack';
       const desiredYaw=Math.atan2(toPlayer.x,toPlayer.z);
-      e.group.rotation.y+=(desiredYaw-e.group.rotation.y)*(1-Math.exp(-6*dt));
+      e.group.rotation.y+=angDiff(desiredYaw,e.group.rotation.y)*(1-Math.exp(-6*dt));
       if(!e.disarmed&&e.cooldown<=0){
         e.cooldown=1.6+Math.random()*0.6;
         e.recoil=0.15;
-        enemyShoot(e,toPlayer);
+        enemyShoot(e,enemyRayDir);
       }
     }else{
       e.state='patrol';
@@ -283,12 +322,13 @@ function updateEnemies(dt){
         e.target=(e.target+1)%e.path.length;
       }else{
         to.normalize();
-        e.pos.addScaledVector(to,2.2*dt);
+        enemyWalkDirection.copy(to);
         moving=true;
       }
       const desiredYaw=Math.atan2(to.x,to.z);
-      e.group.rotation.y+=(desiredYaw-e.group.rotation.y)*(1-Math.exp(-6*dt));
+      e.group.rotation.y+=angDiff(desiredYaw,e.group.rotation.y)*(1-Math.exp(-6*dt));
     }
+    moveEnemyBody(e,dt);
     e.group.position.copy(e.pos);
     e.walkPhase+=dt*(moving?10:2.2);
     const stride=moving?Math.sin(e.walkPhase)*0.62:Math.sin(e.walkPhase)*0.035;
@@ -306,57 +346,75 @@ function updateEnemies(dt){
   }
 }
 const enemyBullets=[];
-const solidTargets=[];
-const enemyToPlayer=V(),enemyRayOrigin=V(),enemyRayDir=V(),enemyBulletDelta=V(),enemyBulletRayDir=V();
-const enemyBulletTravel=V(),enemyBulletClosest=V();
+const enemySightHits=[],enemyBulletHits=[];
+const enemyToPlayer=V(),enemyRayOrigin=V(),enemyRayDir=V(),enemyBulletRayDir=V();
+const enemyBulletTravel=V();
+function rayPlayerCapsuleDistance(origin,direction,far){
+  const radius=PLAYER_RADIUS,low=player.pos.y+radius,high=player.pos.y+PLAYER_HEIGHT-radius;
+  const x=origin.x-player.pos.x,z=origin.z-player.pos.z;
+  const nearestY=Math.max(low,Math.min(high,origin.y));
+  if(x*x+z*z+(origin.y-nearestY)**2<=radius*radius)return 0;
+  let best=Infinity;
+  const a=direction.x*direction.x+direction.z*direction.z;
+  const b=x*direction.x+z*direction.z,c=x*x+z*z-radius*radius;
+  const discriminant=b*b-a*c;
+  if(a>1e-12&&discriminant>=0){
+    const t=(-b-Math.sqrt(discriminant))/a;
+    const y=origin.y+direction.y*t;
+    if(t>=0&&t<=far&&y>=low&&y<=high)best=t;
+  }
+  for(const centerY of [low,high]){
+    const y=origin.y-centerY;
+    const projection=x*direction.x+y*direction.y+z*direction.z;
+    const disc=projection*projection-(x*x+y*y+z*z-radius*radius);
+    if(disc<0)continue;
+    const t=-projection-Math.sqrt(disc);
+    if(t>=0&&t<=far)best=Math.min(best,t);
+  }
+  return best;
+}
 function enemyShoot(e,dir){
   const dmg=8;
   const origin=e.pos.clone().add(V(0,1.5,0));
   const spread=new THREE.Vector3((Math.random()-0.5)*0.05,(Math.random()-0.5)*0.05,(Math.random()-0.5)*0.05);
   const d=dir.clone().add(spread).normalize();
   const speed=22;
-  enemyBullets.push({pos:origin.clone(),prev:origin.clone(),vel:d.multiplyScalar(speed),life:2.5,dmg,color:0xff8866});
+  enemyBullets.push({pos:origin.clone(),prev:origin.clone(),vel:d.multiplyScalar(speed),life:2.5,age:0,dmg,mesh:null});
+}
+
+function removeEnemyBullet(index){
+  const bullet=enemyBullets[index];
+  if(bullet.mesh)releaseBulletEffect(bullet.mesh);
+  enemyBullets.splice(index,1);
 }
 
 function updateEnemyBullets(dt){
   if(enemyBullets.length===0)return;
-  solidTargets.length=0;
-  for(const mesh of occluders)solidTargets.push(mesh);
   for(let i=enemyBullets.length-1;i>=0;i--){
     const b=enemyBullets[i];
     b.prev.copy(b.pos);
-    b.pos.addScaledVector(b.vel,dt);
-    b.life-=dt;
-    if(b.life<=0){enemyBullets.splice(i,1);continue;}
+    const elapsed=Math.min(dt,Math.max(0,b.life));
+    b.pos.addScaledVector(b.vel,elapsed);
+    b.age=(b.age||0)+elapsed;
+    b.life-=elapsed;
     enemyBulletTravel.subVectors(b.pos,b.prev);
     const travel=enemyBulletTravel.length();
     let wallDist=Infinity;
     if(travel>0.001){
       enemyBulletRayDir.copy(enemyBulletTravel).multiplyScalar(1/travel);
-      rc.set(b.prev,enemyBulletRayDir);rc.far=travel+0.05;rc.near=0.001;
-      const hits=rc.intersectObjects(solidTargets,false);
+      rc.set(b.prev,enemyBulletRayDir);rc.far=travel;rc.near=0;
+      enemyBulletHits.length=0;
+      const hits=rc.intersectObjects(getCameraOccluderCandidates(
+        b.prev,enemyBulletRayDir,travel),false,enemyBulletHits);
       if(hits.length)wallDist=hits[0].distance;
     }
-    const travelSq=enemyBulletTravel.lengthSq();
-    const hitT=travelSq>1e-6?Math.max(0,Math.min(1,enemyBulletDelta.subVectors(player.pos,b.prev).dot(enemyBulletTravel)/travelSq)):0;
-    enemyBulletClosest.copy(b.prev).addScaledVector(enemyBulletTravel,hitT);
-    const d=enemyBulletDelta.subVectors(enemyBulletClosest,player.pos);
-    if(hitT*travel<=wallDist+0.02&&Math.abs(d.y)<1.2&&Math.hypot(d.x,d.z)<0.45){
-      player.hp-=b.dmg;
-      showHit();
-      updateStatsUI();
-      enemyBullets.splice(i,1);
-      if(player.hp<=0){
-        player.hp=100;
-        player.pos.set(8,0,16);
-        player.vel.set(0,0,0);
-        player.mode='ground';
-        player.landingSurface=null;
-        updateStatsUI();
-      }
+    const playerDistance=travel>0.001?rayPlayerCapsuleDistance(b.prev,enemyBulletRayDir,travel):Infinity;
+    if(playerDistance<Infinity&&playerDistance<=wallDist){
+      damagePlayer(b.dmg);
+      removeEnemyBullet(i);
       continue;
     }
-    if(wallDist<Infinity)enemyBullets.splice(i,1);
+    if(wallDist<Infinity||b.life<=0)removeEnemyBullet(i);
   }
 }
 

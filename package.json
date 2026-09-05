@@ -8,6 +8,7 @@
     "test:cpu": "node --test --test-concurrency=1 tests/cpu.test.cjs",
     "test:full": "node --test --test-concurrency=1 tests/full-world.test.cjs",
     "test:browser": "node --test --test-concurrency=1 tests/browser.test.cjs",
+    "test:stress": "node --test --test-concurrency=1 tests/stress.test.cjs",
     "test:all": "node tests/run-all.cjs",
     "test:bench": "node tests/benchmark.cjs"
   },

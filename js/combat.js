@@ -1,33 +1,70 @@
 /* Weapons, projectiles, explosions, and structural damage. Loaded in order from index.html. */
 const WEAPONS={
-  pistol:{name:'PISTOL',mag:12,reserve:48,dmg:22,rof:0.16,spread:0,max:96},
-  rifle:{name:'RIFLE',mag:30,reserve:90,dmg:14,rof:0.09,spread:0,max:150},
-  shotgun:{name:'SHOTGUN',mag:6,reserve:24,dmg:9,rof:0.55,spread:0.08,pellets:7,max:36},
-  rpg:{name:'RPG',mag:1,reserve:99,dmg:250,rof:0.7,spread:0,max:99,projectile:'rocket'}
+  pistol:{name:'PISTOL',dmg:22,rof:0.16,spread:0},
+  rifle:{name:'RIFLE',dmg:14,rof:0.09,spread:0},
+  shotgun:{name:'SHOTGUN',dmg:9,rof:0.55,spread:0.08,pellets:7},
+  /* The slot-four launcher is intentionally absurd: full-strength rockets at
+     an automatic-rifle cadence. The renderer/physics side keeps a separate
+     live-projectile cap so holding the trigger into open sky stays bounded. */
+  rpg:{name:'RPG',displayName:'MACHINE RPG',dmg:250,rof:0.075,
+    spread:0,projectile:'rocket',automatic:true},
+  cannon:{name:'CANNON',displayName:'A-10 20MM CANNON',
+    dmg:110,rof:0.028,spread:0.003,automatic:true,
+    structuralPower:2.65,structureDamage:12,cellDamage:12,cellThreshold:4.2,
+    structurePenetration:3.2,structureRadius:0.66,structureCells:8,
+    debrisKick:4.8,impactForce:15,cameraKick:0.009,tracerScale:1.55,
+    impactColor:0xffb34d}
 };
-const playerWpn={cur:'rpg',mag:1,reserve:99,cooldown:0,reloading:0};
+const playerWpn={cur:'cannon',cooldown:0,shotSerial:0};
+const weaponShotSounds={
+  PISTOL:Sfx.pistol,RIFLE:Sfx.rifle,SHOTGUN:Sfx.shotgun,
+  RPG:Sfx.rpg,CANNON:Sfx.cannon
+};
 const shotTargets=[];
-function collectShotTargets(){
+const shotCameraHits=[],shotWorldHits=[];
+function actorIntersectsShotCorridor(actor,origin,dir,far){
+  if(!origin||!dir||!actor||!actor.pos)return true;
+  const rx=actor.pos.x-origin.x,ry=actor.pos.y+1.1-origin.y,
+    rz=actor.pos.z-origin.z;
+  const along=rx*dir.x+ry*dir.y+rz*dir.z;
+  const radius=2.2;
+  if(along<-radius||along>(far||SHOT_MAX_DISTANCE)+radius)return false;
+  const closest=Math.max(0,Math.min(far||SHOT_MAX_DISTANCE,along));
+  const dx=rx-dir.x*closest,dy=ry-dir.y*closest,dz=rz-dir.z*closest;
+  return dx*dx+dy*dy+dz*dz<=radius*radius;
+}
+function collectShotTargets(origin,dir,far){
   shotTargets.length=0;
-  for(const mesh of occluders)shotTargets.push(mesh);
-  for(const e of enemies)if(e.alive)shotTargets.push(...actorTargetMeshes(e));
-  for(const d of dummies)if(d.alive)shotTargets.push(...actorTargetMeshes(d));
-  shotTargets.push(ground);
+  /* Query the exact same solid meshes through the world XZ broadphase. The old
+     path raycast every instance in all four skyscrapers twice per cannon round,
+     even when those buildings were behind the player. Bounds are conservative,
+     so this only removes impossible candidates—not any valid hit. */
+  const worldTargets=origin&&dir&&typeof getCameraOccluderCandidates==='function'
+    ?getCameraOccluderCandidates(origin,dir,far||SHOT_MAX_DISTANCE)
+    :occluders;
+  for(const mesh of worldTargets)shotTargets.push(mesh);
+  for(const e of enemies)if(e.alive&&actorIntersectsShotCorridor(e,origin,dir,far))
+    shotTargets.push(...actorTargetMeshes(e));
+  for(const d of dummies)if(d.alive&&actorIntersectsShotCorridor(d,origin,dir,far))
+    shotTargets.push(...actorTargetMeshes(d));
+  if(shotTargets.indexOf(ground)<0)shotTargets.push(ground);
   return shotTargets;
 }
 /* Small-arms fire can create several short-lived tracer and impact meshes per
    frame. Recycle the meshes and their per-instance materials so sustained
    fire does not turn visual feedback into a garbage-collection hitch. */
-const bulletEffectPools={tracer:[],spark:[]};
+const bulletEffectPools={tracer:[],enemyTracer:[],spark:[]};
 function acquireBulletEffect(kind){
   const pool=bulletEffectPools[kind]||bulletEffectPools.tracer;
   let line=pool.pop();
   if(!line){
-    const material=kind==='tracer'
-      ?new THREE.MeshBasicMaterial({color:0xfff066,transparent:true,opacity:1.0})
+    const tracer=kind==='tracer'||kind==='enemyTracer';
+    const material=tracer
+      ?new THREE.MeshBasicMaterial({color:kind==='enemyTracer'?0xff6a35:0xfff066,
+        transparent:true,opacity:1.0,depthWrite:false})
       :new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:1.0,
         blending:THREE.AdditiveBlending,depthWrite:false});
-    line=new THREE.Mesh(kind==='tracer'?geoBullet:geoSpark,material);
+    line=new THREE.Mesh(tracer?geoBullet:geoSpark,material);
     line.userData.bulletEffectKind=kind;
   }
   line.visible=true;
@@ -49,9 +86,82 @@ const shotAimPoint=V(),shotStart=V(),shotBaseDir=V(),shotRayDir=V(),
   rocketLaunchDir=V();
 const SHOT_MAX_DISTANCE=120;
 const ROCKET_SPEED=45;
-const ROCKET_GRAVITY=9.8;
+const ROCKET_GRAVITY=WORLD_GRAVITY;
+const MAX_ACTIVE_ROCKETS=48;
+const rocketPrev=V(),rocketTravel=V(),rocketAxis=V();
+function updateRockets(dt){
+  for(let i=rockets.length-1;i>=0;i--){
+    const r=rockets[i];
+    const elapsed=Math.min(dt,Math.max(0,r.life));
+    rocketPrev.copy(r.pos);
+    r.pos.addScaledVector(r.vel,elapsed);
+    /* Integrate the same constant-gravity trajectory used by the launch
+       solver. The previous semi-implicit step added one extra frame of drop,
+       so even a mathematically corrected shot landed below the reticle. */
+    r.pos.y-=0.5*ROCKET_GRAVITY*elapsed*elapsed;
+    r.vel.y-=ROCKET_GRAVITY*elapsed;
+    r.life-=elapsed;
+    r.mesh.position.copy(r.pos);
+    r.dir.copy(r.vel).normalize();
+    r.mesh.quaternion.setFromUnitVectors(UP,r.dir);
+    r.trailTimer-=dt;
+    if(r.trailTimer<=0){
+      r.trailTimer=0.06;
+      const smoke=makeParticleMesh(geoSmoke,'smoke',0xb8b8b8);
+      smoke.position.copy(r.pos);
+      smoke.userData.life=0.9;
+      smoke.userData.lifeMax=0.9;
+      smoke.userData.vel=V(rand(-0.5,0.5),1+rand(0,0.6),rand(-0.5,0.5));
+      scene.add(smoke);
+      addParticle(smoke);
+      if(Math.random()<0.4){
+        const fire=makeParticleMesh(geoFire,'fire',0xff8030);
+        fire.position.copy(r.pos);
+        fire.userData.life=0.2;fire.userData.lifeMax=0.2;
+        fire.userData.vel=V(0,0,0);
+        scene.add(fire);
+        addParticle(fire);
+      }
+    }
+    let hit=false,hitPoint=null;
+    rocketTravel.subVectors(r.pos,rocketPrev);
+    const travel=rocketTravel.length();
+    if(travel>0.001){
+      rocketAxis.copy(rocketTravel).multiplyScalar(1/travel);
+      rc.set(rocketPrev,rocketAxis);rc.far=travel+0.2;rc.near=0.001;
+      /* Projectiles collide with every solid visual and voxel actor that the
+         reticle can resolve, including roofs, trim, and already-fallen chunks. */
+      const hits=rc.intersectObjects(
+        collectShotTargets(rocketPrev,rocketAxis,travel+0.2),false);
+      if(hits.length){hit=true;hitPoint=hits[0].point.clone();}
+    }
+    if(!hit&&r.pos.y<0.1){hit=true;hitPoint=r.pos.clone();}
+    if(hit){
+      scene.remove(r.mesh);
+      explode(hitPoint);
+      rockets.splice(i,1);
+    }else if(r.life<=0){
+      scene.remove(r.mesh);rockets.splice(i,1);
+    }
+  }
+}
+const muzzleProbeOrigin=V(),muzzleProbeDirection=V(),muzzleProbeHits=[];
+function resolveMuzzleObstruction(start){
+  muzzleProbeOrigin.set(player.pos.x,player.pos.y+1.3,player.pos.z);
+  muzzleProbeDirection.subVectors(start,muzzleProbeOrigin);
+  const distance=muzzleProbeDirection.length();
+  if(distance<0.01)return start;
+  muzzleProbeDirection.multiplyScalar(1/distance);
+  rc.set(muzzleProbeOrigin,muzzleProbeDirection);rc.near=0;rc.far=distance;
+  muzzleProbeHits.length=0;
+  rc.intersectObjects(getCameraOccluderCandidates(muzzleProbeOrigin,
+    muzzleProbeDirection,distance),false,muzzleProbeHits);
+  if(muzzleProbeHits.length)
+    start.copy(muzzleProbeHits[0].point).addScaledVector(muzzleProbeDirection,-0.015);
+  return start;
+}
 
-function resolveCursorShot(start,targets,out){
+function resolveCursorShot(start,out){
   /* The fixed reticle represents the centre of the rendered camera. Resolve
      that ray against the visible world first, then converge the physical
      muzzle ray on the same point. The old direction came from the player's
@@ -61,7 +171,9 @@ function resolveCursorShot(start,targets,out){
   camera.getWorldDirection(tmpDir).normalize();
   shotAimPoint.copy(camera.position).addScaledVector(tmpDir,SHOT_MAX_DISTANCE);
   rc.set(camera.position,tmpDir);rc.far=SHOT_MAX_DISTANCE;rc.near=0.01;
-  const cameraHits=rc.intersectObjects(targets,false);
+  const targets=collectShotTargets(camera.position,tmpDir,SHOT_MAX_DISTANCE);
+  shotCameraHits.length=0;
+  const cameraHits=rc.intersectObjects(targets,false,shotCameraHits);
   if(cameraHits.length)shotAimPoint.copy(cameraHits[0].point);
   out.subVectors(shotAimPoint,start);
   /* A camera pressed directly into geometry can resolve a point behind the
@@ -107,21 +219,24 @@ function solveRocketLaunch(start,target,directDir,out){
 }
 function wpnStats(){return WEAPONS[playerWpn.cur];}
 function setWeapon(name){
-  if(!WEAPONS[name])return;
-  if(WEAPONS[playerWpn.cur]&&playerWpn.cur!==name){
-    WEAPONS[playerWpn.cur]._savedMag=playerWpn.mag;
-    WEAPONS[playerWpn.cur]._savedRes=playerWpn.reserve;
-  }
+  if(!WEAPONS[name]||playerWpn.cur===name)return;
   playerWpn.cur=name;
-  const w=WEAPONS[name];
-  playerWpn.mag=w._savedMag!==undefined?w._savedMag:w.mag;
-  playerWpn.reserve=w._savedRes!==undefined?Math.min(w.max,w._savedRes):w.reserve;
-  playerWpn.reloading=0;
   if(typeof updateGunVisual==='function')updateGunVisual();
   updateStatsUI();
 }
-function startReload(){return;}
-function finishReload(){}
+function updateWeaponFire(dt){
+  /* Carry fractional cooldown across ticks. Resetting it to ROF after every
+     shot rounded the cannon down to the current display's frame cadence. */
+  playerWpn.cooldown-=dt;
+  if(!mouseHeld||!playerCanShoot()){
+    playerWpn.cooldown=Math.max(0,playerWpn.cooldown);
+    return;
+  }
+  let budget=8;
+  while(playerWpn.cooldown<=1e-10&&budget-->0){
+    if(!shoot())break;
+  }
+}
 
 /* Keep the RPG powerful at the impact point without turning a near miss into
    a map-wide damage pulse. Self splash is tighter still and respects cover. */
@@ -138,6 +253,7 @@ function distanceToBox(point,box){
 
 const blastRayDir=V(),blastTarget=V(),blastPlayerTarget=V(),blastMarkNormal=V();
 const blastClosestPoint=V(),blastCandidatePoint=V();
+const blastWorldHits=[],blastBlockers=new Set(),actorBlastExposures=new Map();
 function destructibleBlastTarget(dObj,point,out){
   if(!dObj||!dObj.fragmented||!dObj.fracturePrepared){
     dObj.worldBox.clampPoint(point,out);
@@ -187,7 +303,9 @@ function blastExposure(epicenter,dObj){
   if(distance<0.1)return 1;
   blastRayDir.multiplyScalar(1/distance);
   rc.set(epicenter,blastRayDir);rc.far=distance-0.06;rc.near=0.04;
-  const hits=rc.intersectObjects(occluders,false);
+  blastWorldHits.length=0;blastBlockers.clear();
+  const hits=rc.intersectObjects(getCameraOccluderCandidates(
+    epicenter,blastRayDir,distance),false,blastWorldHits);
   let blockers=0;
   for(const hit of hits){
     const object=hit.object,ud=object&&object.userData;
@@ -197,7 +315,8 @@ function blastExposure(epicenter,dObj){
        (ud&&ud.parent===dObj)||
        (ud&&ud.voxelStructure&&ud.voxelStructure.dObj===dObj)||
        (ud&&ud.structuralRoot===dObj.root)||object===ground)continue;
-    blockers++;
+    if(blastBlockers.has(object))continue;
+    blastBlockers.add(object);blockers++;
     if(blockers>=2)break;
   }
   return blockers?Math.pow(0.38,blockers):1;
@@ -205,15 +324,20 @@ function blastExposure(epicenter,dObj){
 
 function blastExposureToPlayer(epicenter){
   blastPlayerTarget.set(player.pos.x,player.pos.y+1.0,player.pos.z);
-  blastRayDir.subVectors(blastPlayerTarget,epicenter);
+  return blastExposureToPoint(epicenter,blastPlayerTarget);
+}
+function blastExposureToPoint(epicenter,target){
+  blastRayDir.subVectors(target,epicenter);
   const distance=blastRayDir.length();
   if(distance<0.1)return 1;
   blastRayDir.multiplyScalar(1/distance);
   /* Start just outside the impact point so a rocket embedded in a wall does
      not count that same wall twice before checking the player's cover. */
-  const origin=blastTarget.copy(epicenter).addScaledVector(blastRayDir,0.08);
-  rc.set(origin,blastRayDir);rc.far=Math.max(0.05,distance-0.12);rc.near=0.01;
-  const hits=rc.intersectObjects(occluders,false);
+  const origin=blastTarget.copy(epicenter).addScaledVector(blastRayDir,0.015);
+  rc.set(origin,blastRayDir);rc.far=Math.max(0.01,distance-0.03);rc.near=0;
+  blastWorldHits.length=0;
+  const hits=rc.intersectObjects(getCameraOccluderCandidates(
+    origin,blastRayDir,rc.far),false,blastWorldHits);
   let blockers=0;
   for(const hit of hits){
     const object=hit.object;
@@ -228,6 +352,10 @@ function blastExposureToPlayer(epicenter){
 }
 
 function fireRocket(start,dir){
+  if(rockets.length>=MAX_ACTIVE_ROCKETS){
+    const expired=rockets.shift();
+    if(expired&&expired.mesh)scene.remove(expired.mesh);
+  }
   const rocket=new THREE.Mesh(geoRocket,matRocket);
   rocket.castShadow=true;
   rocket.position.copy(start);
@@ -242,6 +370,15 @@ function fireRocket(start,dir){
 function explode(epicenter){
   Sfx.explosion();
   const R=RPG_BLAST_RADIUS;
+  /* Cover is sampled before this explosion removes it. The same rule applies
+     to enemies and the player, including a wall destroyed by this very hit. */
+  const playerExposure=blastExposureToPlayer(epicenter);
+  actorBlastExposures.clear();
+  for(const actors of [enemies,dummies])for(const actor of actors){
+    if(!actor.alive||actor.pos.distanceToSquared(epicenter)>R*R)continue;
+    blastPlayerTarget.copy(actor.pos);blastPlayerTarget.y+=1;
+    actorBlastExposures.set(actor,blastExposureToPoint(epicenter,blastPlayerTarget));
+  }
   /* A second blast can catch pieces still in the release queue; they are not
      magically immune just because their parent structure has already fractured. */
   for(const event of fractureQueue){
@@ -260,6 +397,7 @@ function explode(epicenter){
      piece forever. */
   applyBlastToActiveDebris(epicenter,10);
   voxelPhysics.blastChunks(epicenter,10);
+  voxelPhysics.blastDebris(epicenter,10);
   for(const d of destructibles){
     /* A fractured structure remains addressable: later blasts can punch the
        standing section apart even after its original root mesh is gone. */
@@ -294,34 +432,31 @@ function explode(epicenter){
     if(!e.alive)continue;
     const dist=V().subVectors(e.pos,epicenter).length();
     if(dist>R)continue;
-    const dmg=Math.round(120*(1-dist/R));
-    const blastForce=11*(1-dist/R)+4;
+    const exposure=actorBlastExposures.get(e)||0;
+    const dmg=Math.round(120*(1-dist/R)*exposure);
+    const blastForce=(11*(1-dist/R)+4)*exposure;
     const outcome=damageVoxelActorFromBlast(e,epicenter,dmg,blastForce);
     if(outcome.killed){
       kills++;
     }else{
       const to=V().subVectors(e.pos,epicenter).normalize();
-      e.pos.addScaledVector(to,2*(1-dist/R));
+      e.vel.addScaledVector(to,blastForce);
     }
   }
   for(const d of dummies){
     if(!d.alive)continue;
     const dist=d.pos.distanceTo(epicenter);if(dist>R)continue;
-    const dmg=Math.round(100*(1-dist/R));
-    const blastForce=10*(1-dist/R)+3.5;
+    const exposure=actorBlastExposures.get(d)||0;
+    const dmg=Math.round(100*(1-dist/R)*exposure);
+    const blastForce=(10*(1-dist/R)+3.5)*exposure;
     d.tilt=Math.min(1.5,d.tilt+0.8*(1-dist/R));
     damageVoxelActorFromBlast(d,epicenter,dmg,blastForce);
   }
   blastPlayerTarget.set(player.pos.x,player.pos.y+1.0,player.pos.z);
   const pDist=blastPlayerTarget.distanceTo(epicenter);
   if(pDist<RPG_SELF_DAMAGE_RADIUS){
-    const cover=blastExposureToPlayer(epicenter);
-    const dmg=Math.round(RPG_SELF_DAMAGE*(1-pDist/RPG_SELF_DAMAGE_RADIUS)*cover);
-    if(dmg>0){player.hp-=dmg;showHit();}
-    if(player.hp<=0){
-      player.hp=100;player.pos.set(8,0,16);player.vel.set(0,0,0);player.mode='ground';player.landingSurface=null;
-    }
-    updateStatsUI();
+    const dmg=Math.round(RPG_SELF_DAMAGE*(1-pDist/RPG_SELF_DAMAGE_RADIUS)*playerExposure);
+    damagePlayer(dmg);
   }
   const flash=new THREE.Mesh(
     geoFlash,
@@ -633,10 +768,14 @@ function damageStructureFromBullet(dObj,mesh,point,dir,w,normal){
   if(!dObj||(!dObj.voxelManaged&&!dObj.alive&&!dObj.fragmented))return;
   if(dObj.voxelManaged){
     const meshData=mesh&&mesh.userData;
-    const power=w.name==='SHOTGUN'?0.72:(w.name==='RIFLE'?0.34:0.18);
+    const power=w.structuralPower!==undefined?w.structuralPower:
+      (w.name==='SHOTGUN'?0.72:(w.name==='RIFLE'?0.34:0.18));
     const broke=meshData&&meshData.voxelChunk
       ?voxelPhysics.damageChunk(mesh,dir,power*3)
-      :voxelPhysics.damageAt(dObj.voxelStructure,point,power,dir);
+      :(w.structurePenetration!==undefined&&voxelPhysics.damagePath
+        ?voxelPhysics.damagePath(dObj.voxelStructure,point,dir,power,
+          w.structurePenetration,w.structureRadius,w.structureCells)
+        :voxelPhysics.damageAt(dObj.voxelStructure,point,power,dir));
     if(!dObj.destroyed)dObj.hp-=power*3.5;
     if(dObj.hp<=0){dObj.alive=false;dObj.destroyed=true;}
     if(broke)spawnDebrisDust(point,Math.min(1,0.35+power));
@@ -645,7 +784,8 @@ function damageStructureFromBullet(dObj,mesh,point,dir,w,normal){
   /* Small arms chip the facade; they do not convert the whole building into a
      grid on the first hit. Repeated fire accumulates structural damage, while
      a shotgun concentrates enough force to matter locally. */
-  const damage=w.name==='SHOTGUN'?3.0:(w.name==='RIFLE'?1.8:0.55);
+  const damage=w.structureDamage!==undefined?w.structureDamage:
+    (w.name==='SHOTGUN'?3.0:(w.name==='RIFLE'?1.8:0.55));
   dObj.hp-=damage;
   spawnStructuralMark(point,normal,Math.min(0.16,0.045+damage*0.012));
   const ud=mesh&&mesh.userData;
@@ -654,10 +794,13 @@ function damageStructureFromBullet(dObj,mesh,point,dir,w,normal){
       ?mesh:structuralCellForPoint(dObj,point));
   let localBreak=false;
   if(cell){
-    const cellDamage=w.name==='SHOTGUN'?3.0:(w.name==='RIFLE'?1.8:0.55);
+    const cellDamage=w.cellDamage!==undefined?w.cellDamage:
+      (w.name==='SHOTGUN'?3.0:(w.name==='RIFLE'?1.8:0.55));
     const materialResistance=dObj.fractureKind==='glass'?0.62:
       (dObj.fractureKind==='wood'?0.84:1);
-    const threshold=(w.name==='SHOTGUN'?9.0:(w.name==='RIFLE'?10.8:16.5))*
+    const baseThreshold=w.cellThreshold!==undefined?w.cellThreshold:
+      (w.name==='SHOTGUN'?9.0:(w.name==='RIFLE'?10.8:16.5));
+    const threshold=baseThreshold*
       materialResistance;
     cell.userData.impactDamage=(cell.userData.impactDamage||0)+cellDamage;
     if(cell.userData.impactDamage>=threshold){
@@ -669,7 +812,9 @@ function damageStructureFromBullet(dObj,mesh,point,dir,w,normal){
   }
   if(ud&&ud.kind==='cell'&&ud.released){
     const body=ud;
-    const kick=(w.name==='SHOTGUN'?1.35:(w.name==='RIFLE'?0.55:0.2))/Math.max(0.25,body.mass||1);
+    const debrisKick=w.debrisKick!==undefined?w.debrisKick:
+      (w.name==='SHOTGUN'?1.35:(w.name==='RIFLE'?0.55:0.2));
+    const kick=debrisKick/Math.max(0.25,body.mass||1);
     body.vel.addScaledVector(dir,kick);
     body.angVel.y+=kick*0.7;
     body.sleeping=false;
@@ -763,34 +908,39 @@ function playerCanShoot(){
 }
 
 function shoot(){
-  if(!playerCanShoot())return;
+  if(!playerCanShoot())return false;
   const w=wpnStats();
-  if(playerWpn.cooldown>0||playerWpn.reloading>0)return;
-  playerWpn.cooldown=w.rof;
+  if(playerWpn.cooldown>1e-10)return false;
+  playerWpn.cooldown+=w.rof;
+  playerWpn.shotSerial++;
   const recoil=weaponRecoilProfiles[w.name]||weaponRecoilProfiles.RPG;
   weaponRecoilKick=Math.min(1.35,weaponRecoilKick+recoil.load);
   weaponRecoilPitch=Math.min(0.3,weaponRecoilPitch+recoil.pitch);
   weaponRecoilRoll=Math.max(-0.14,Math.min(0.14,
     weaponRecoilRoll+(Math.random()-0.5)*recoil.roll));
-  const shotSnd={PISTOL:Sfx.pistol,RIFLE:Sfx.rifle,SHOTGUN:Sfx.shotgun,RPG:Sfx.rpg};
-  if(shotSnd[w.name])shotSnd[w.name]();
-  const kickAmp=w.projectile==='rocket'?0.05:(w.name==='SHOTGUN'?0.055:(w.name==='RIFLE'?0.028:0.035));
+  if(weaponShotSounds[w.name])weaponShotSounds[w.name]();
+  const kickAmp=w.cameraKick!==undefined?w.cameraKick:
+    (w.projectile==='rocket'?0.05:(w.name==='SHOTGUN'?0.055:(w.name==='RIFLE'?0.028:0.035)));
   camPitchKick+=kickAmp;
   camFovKick=Math.max(camFovKick,2.5);
   const crossEl=document.getElementById('cross');
-  crossEl.classList.remove('recoil');void crossEl.offsetWidth;crossEl.classList.add('recoil');
+  /* Alternate identical animation names to restart recoil without a forced
+     synchronous layout. That reflow landed directly in every cannon frame. */
+  const recoilClass=playerWpn.shotSerial&1?'recoil-a':'recoil-b';
+  crossEl.classList.remove(recoilClass==='recoil-a'?'recoil-b':'recoil-a');
+  crossEl.classList.add(recoilClass);
   /* Fire from the rendered muzzle so the projectile, flash, and weapon stay aligned. */
   const start=shotStart.fromArray(weaponMuzzlePoints[playerWpn.cur]||weaponMuzzlePoints.rpg);
   guy.updateMatrixWorld(true);
   gunGroup.localToWorld(start);
-  const targets=collectShotTargets();
-  const camDir=resolveCursorShot(start,targets,shotBaseDir);
+  resolveMuzzleObstruction(start);
+  const camDir=resolveCursorShot(start,shotBaseDir);
   if(w.projectile==='rocket'){
     const dir=solveRocketLaunch(start,shotAimPoint,camDir,rocketLaunchDir);
     spawnMuzzle(start,dir);
     fireRocket(start,dir);
     updateStatsUI();
-    return;
+    return true;
   }
   spawnMuzzle(start,camDir);
   const pellets=w.pellets||1;
@@ -800,8 +950,10 @@ function shoot(){
        with visible camera recoil supplying their accuracy cost. */
     const spreadAmount=pellets>1&&p===0?0:w.spread;
     const dir=spreadShotDirection(camDir,spreadAmount,shotRayDir);
-    rc.set(start,dir);rc.far=SHOT_MAX_DISTANCE;rc.near=0.1;
-    const hits=rc.intersectObjects(targets,false);
+    rc.set(start,dir);rc.far=SHOT_MAX_DISTANCE;rc.near=0;
+    const targets=collectShotTargets(start,dir,SHOT_MAX_DISTANCE);
+    shotWorldHits.length=0;
+    const hits=rc.intersectObjects(targets,false,shotWorldHits);
     const end=shotEnd.copy(start).addScaledVector(dir,SHOT_MAX_DISTANCE);
     let hitTarget=null,hitKind=null,hitObject=null,structuralTarget=null;
     if(hits.length){
@@ -823,7 +975,8 @@ function shoot(){
     if(len<0.05)continue;
     const mid=shotMid.copy(start).addScaledVector(v3,0.5);
     const tracer=acquireBulletEffect('tracer');
-    tracer.scale.y=Math.max(0.001,len);
+    const tracerScale=w.tracerScale||1;
+    tracer.scale.set(tracerScale,Math.max(0.001,len),tracerScale);
     tracer.position.copy(mid);
     tracer.quaternion.setFromUnitVectors(UP,shotAxis.copy(v3).normalize());
     scene.add(tracer);
@@ -834,22 +987,25 @@ function shoot(){
     bulletLines.push({line:spark,life:0.28,lifeMax:0.28});
     if(hits.length&&hits[0].face){
       const inrm=wn(hits[0],hits[0].object,worldNormalScratch);
-      spawnImpact(end,inrm);
+      spawnImpact(end,inrm,w.impactColor);
     }
     if(hitTarget&&hitKind==='enemy'){
       Sfx.hit();
       showMarker();
-      const impactForce=w.name==='SHOTGUN'?4.2:(w.name==='RIFLE'?2.7:2.2);
+      const impactForce=w.impactForce!==undefined?w.impactForce:
+        (w.name==='SHOTGUN'?4.2:(w.name==='RIFLE'?2.7:2.2));
       const outcome=damageVoxelActor(hitTarget,hitObject,end,dir,w.dmg,impactForce);
       if(outcome.killed){
         Sfx.kill();
-        makePickup('ammo',hitTarget.pos.x,hitTarget.pos.z);
+        makePickup('health',hitTarget.pos.x,hitTarget.pos.z,hitTarget.pos.y);
         kills++;
       }
     }else if(hitTarget&&hitKind==='dummy'){
       Sfx.hit();
+      showMarker();
       hitTarget.tilt=Math.min(1.5,hitTarget.tilt+0.4);
-      const impactForce=w.name==='SHOTGUN'?4:(w.name==='RIFLE'?2.5:2);
+      const impactForce=w.impactForce!==undefined?w.impactForce:
+        (w.name==='SHOTGUN'?4:(w.name==='RIFLE'?2.5:2));
       damageVoxelActor(hitTarget,hitObject,end,dir,w.dmg,impactForce);
     }else if(structuralTarget){
       damageStructureFromBullet(structuralTarget,hits[0].object,end,dir,w,
@@ -857,4 +1013,5 @@ function shoot(){
     }
   }
   updateStatsUI();
+  return true;
 }

@@ -9,6 +9,8 @@ window.addEventListener('error',e=>{
 /* ---- lightweight synthesized SFX (no assets, WebAudio) ---- */
 const Sfx=(()=>{
   let ctx=null,master=null,muted=true;
+  let noiseSeed=0x6d2b79f5;
+  const noiseBuffers=new Map();
   const DEFAULT_GAIN=0.5;
   const audioStateBox=document.getElementById('audio');
   function updateAudioUi(){if(audioStateBox)audioStateBox.textContent=muted?'AUDIO OFF':'AUDIO ON';}
@@ -57,9 +59,19 @@ const Sfx=(()=>{
     const c=ac();if(!c)return;
     const t0=c.currentTime+(delay||0);
     const len=Math.max(1,Math.floor(c.sampleRate*dur));
-    const buf=c.createBuffer(1,len,c.sampleRate);
-    const data=buf.getChannelData(0);
-    for(let i=0;i<len;i++)data[i]=(Math.random()*2-1)*(1-i/len);
+    let buf=noiseBuffers.get(len);
+    if(!buf){
+      buf=c.createBuffer(1,len,c.sampleRate);
+      const data=buf.getChannelData(0);
+      /* Audio is independent of gameplay randomness. Toggling sound must
+         never change bullet spread, blast fragments, or enemy decisions.
+         Reuse immutable noise samples during sustained automatic fire. */
+      for(let i=0;i<len;i++){
+        noiseSeed^=noiseSeed<<13;noiseSeed^=noiseSeed>>>17;noiseSeed^=noiseSeed<<5;
+        data[i]=((noiseSeed>>>0)/2147483648-1)*(1-i/len);
+      }
+      noiseBuffers.set(len,buf);
+    }
     const n=c.createBufferSource();n.buffer=buf;
     const g=c.createGain(),f=c.createBiquadFilter();
     f.type='lowpass';
@@ -78,6 +90,7 @@ const Sfx=(()=>{
     rifle(){osc('square',680,240,0.05,0.26,null);noise(0.035,0.2,4200,1100);},
     shotgun(){noise(0.22,0.5,1900,280);osc('square',210,55,0.16,0.36,null);},
     rpg(){noise(0.45,0.45,900,180);osc('sawtooth',150,38,0.42,0.4,null);},
+    cannon(){noise(0.04,0.18,5200,680);osc('square',155,72,0.045,0.16,null);},
     explosion(){noise(0.8,0.75,760,70);osc('sine',95,28,0.62,0.62,null);},
     hit(){osc('square',320,150,0.07,0.2,null);},
     hurt(){osc('sine',230,85,0.26,0.34,null);noise(0.2,0.24,1300,320);},
@@ -90,8 +103,19 @@ const Sfx=(()=>{
 
 const V=(x,y,z)=>new THREE.Vector3(x,y,z);
 const UP=V(0,1,0), DOWN=V(0,-1,0);
+/* World units are metres; every free body uses the same acceleration. The
+   character's jump is specified by height so tuning gravity preserves reach. */
+const WORLD_GRAVITY=9.81;
+const SIMULATION_STEP=1/120;
+const SIMULATION_MAX_STEPS=12;
 
-const renderer=new THREE.WebGLRenderer({antialias:true});
+/* Prefer a discrete/high-performance adapter for the dense instanced skyline.
+   The game is fully opaque and never uses stencil operations, so do not ask
+   the driver for an unused stencil attachment. Neither option changes the
+   rendered image; both avoid needless GPU selection/bandwidth penalties. */
+const renderer=new THREE.WebGLRenderer({
+  antialias:true,powerPreference:'high-performance',stencil:false
+});
 renderer.setSize(innerWidth,innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio,2));
 renderer.shadowMap.enabled=true;
@@ -114,10 +138,27 @@ sun.shadow.camera.far=220;
 sun.shadow.bias=-0.0004;
 scene.add(sun);
 
+let refreshPausedFrame=()=>{};
+function applyRenderSettings(){
+  const quality=gameSettings.quality;
+  const ratioCap=quality==='high'?2:(quality==='balanced'?1.5:1);
+  renderer.setPixelRatio(Math.min(devicePixelRatio,ratioCap));
+  renderer.shadowMap.enabled=quality!=='performance';
+  const shadowSize=quality==='high'?2048:1024;
+  if(sun.shadow.mapSize.x!==shadowSize){
+    sun.shadow.mapSize.set(shadowSize,shadowSize);
+    if(sun.shadow.map){sun.shadow.map.dispose();sun.shadow.map=null;}
+  }
+  renderer.shadowMap.needsUpdate=true;
+  refreshPausedFrame();
+}
+applyRenderSettings();
+
 addEventListener('resize',()=>{
   camera.aspect=innerWidth/innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth,innerHeight);
+  applyRenderSettings();
 });
 
 const M={
@@ -125,6 +166,10 @@ const M={
   brick:new THREE.MeshLambertMaterial({color:0x9a5a46}),
   brickDark:new THREE.MeshLambertMaterial({color:0x6b3d2c}),
   stone:new THREE.MeshLambertMaterial({color:0x99958c}),
+  towerBlue:new THREE.MeshLambertMaterial({color:0x465d6b}),
+  towerSteel:new THREE.MeshLambertMaterial({color:0x656c73}),
+  towerWarm:new THREE.MeshLambertMaterial({color:0x6b5b55}),
+  towerTeal:new THREE.MeshLambertMaterial({color:0x3f625f}),
   wood:new THREE.MeshLambertMaterial({color:0x8a6a42}),
   woodDark:new THREE.MeshLambertMaterial({color:0x6f5433}),
   trim:new THREE.MeshLambertMaterial({color:0xb8a888}),
@@ -271,9 +316,13 @@ function addPhysicsBox(box){
   if(!box._physicsRegistered){
     box._physicsRegistered=true;
     boxes.push(box);
-    staticBoxGridDirty=true;
+    /* Once the static hash exists, append a genuinely new collider directly.
+       Active-state changes do not alter a box's buckets: queries already
+       reject inactive entries. Rebuilding all ~36k authored voxel boxes for
+       every cannon chip was a large main-thread hitch with no physics value. */
+    if(!staticBoxGridDirty&&typeof indexStaticBox==='function')indexStaticBox(box);
+    else staticBoxGridDirty=true;
   }
-  if(box.active!==true)staticBoxGridDirty=true;
   box.active=true;
   return box;
 }
@@ -282,7 +331,8 @@ function addDormantPhysicsBox(box){
   if(!box._physicsRegistered){
     box._physicsRegistered=true;
     boxes.push(box);
-    staticBoxGridDirty=true;
+    if(!staticBoxGridDirty&&typeof indexStaticBox==='function')indexStaticBox(box);
+    else staticBoxGridDirty=true;
   }
   box.active=false;
   return box;
@@ -290,7 +340,6 @@ function addDormantPhysicsBox(box){
 function removePhysicsBox(box){
   if(box&&box._physicsRegistered&&box.active!==false){
     box.active=false;
-    staticBoxGridDirty=true;
   }
 }
 let gripMeshes=[],allProxyMeshes=[],proxyByMesh=new Map(),HOLDS=[];
@@ -317,8 +366,8 @@ const VOXEL_OVERHANG_LOAD=1.55;
    activation work bounded so the render thread does not hitch, while every
    released body still enters the same rigid solver on the next available tick. */
 const FRACTURE_RELEASE_BUDGET=32;
-const DEBRIS_GRAVITY=22;
-const DEBRIS_FIXED_STEP=1/120;
+const DEBRIS_GRAVITY=WORLD_GRAVITY;
+const DEBRIS_FIXED_STEP=SIMULATION_STEP;
 /* Debris always advances at the same fixed rate. Switching to a larger catch-up
    step after a hitch made contacts change character exactly when a pile was
    trying to settle, which read as a one-frame pause/shape shift. The render
@@ -474,13 +523,15 @@ function dynamicChunkMaterial(base){
 }
 
 const voxelPhysics=createVoxelDestructionEngine({
-  THREE,scene,groundY:0,
+  THREE,scene,groundY:0,gravity:WORLD_GRAVITY,
   addStaticBox:addPhysicsBox,
   removeStaticBox:removePhysicsBox,
   addOccluder,
   removeOccluder,
   addStandable(mesh){if(standables.indexOf(mesh)<0)standables.push(mesh);},
   removeStandable(mesh){const i=standables.indexOf(mesh);if(i>=0)standables.splice(i,1);},
+  getDynamicBodies(){return chunks;},
+  getSettledBodies(){return settledFragments;},
   pushFromObb(pos,position,half,axes,radius){
     return pushPositionFromObb(pos,position,half,axes,radius);
   },

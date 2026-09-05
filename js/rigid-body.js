@@ -1,4 +1,18 @@
 /* Legacy rigid debris contacts, support, settling, and fracture release. Loaded in order from index.html. */
+const chunkSpinAxis=V();
+const chunkSpinQuaternion=new THREE.Quaternion();
+const chunkInverseQuaternion=new THREE.Quaternion();
+const blastImpulseWorld=V(),blastTorqueWorld=V(),blastLever=V(),blastTangential=V();
+const activateAway=V(),activateVelocity=V(),blastActiveDelta=V();
+const satNormal=V(),satContact=V(),satSupportA=V(),satSupportB=V(),satSupportDir=V();
+const structuralImpactMarkNormal=V();
+const satCross=V(),satInvCross=V(),satTorque=V(),satLocal=V(),satWorld=V();
+const contactRA=V(),contactRB=V(),contactVelA=V(),contactVelB=V(),contactRelativeVel=V();
+const contactImpulse=V(),contactTangent=V(),groundSupport=V();
+const rollingAxis=V(),rollingImpulse=V(),rollingDelta=V();
+const fractureFailureCenter=V(),fractureFailureDir=V(),fractureFailureAxis=V();
+const activeChunkSet=new Set();
+let supportPathStamp=0;
 function hasStaticSupportPath(body){
   if(!body)return false;
   if(body.staticSupported)return true;
@@ -106,23 +120,26 @@ const STATIC_BOX_GRID_CELL=4;
 const staticBoxGrid=new Map(),staticBoxGridCandidates=[],staticBoxGridLarge=[];
 let staticBoxGridStamp=0;
 function staticBoxGridKey(x,z){return x+'_'+z;}
+function indexStaticBox(box){
+  if(!box||settledBoxSet.has(box)||box._staticGridIndexed)return;
+  const minX=Math.floor(box.min.x/STATIC_BOX_GRID_CELL);
+  const maxX=Math.floor(box.max.x/STATIC_BOX_GRID_CELL);
+  const minZ=Math.floor(box.min.z/STATIC_BOX_GRID_CELL);
+  const maxZ=Math.floor(box.max.z/STATIC_BOX_GRID_CELL);
+  const span=(maxX-minX+1)*(maxZ-minZ+1);
+  if(span>64)staticBoxGridLarge.push(box);
+  else for(let gx=minX;gx<=maxX;gx++)for(let gz=minZ;gz<=maxZ;gz++){
+    const key=staticBoxGridKey(gx,gz);
+    let bucket=staticBoxGrid.get(key);
+    if(!bucket){bucket=[];staticBoxGrid.set(key,bucket);}
+    bucket.push(box);
+  }
+  box._staticGridIndexed=true;
+}
 function rebuildStaticBoxGrid(){
   staticBoxGrid.clear();staticBoxGridLarge.length=0;
-  for(const box of boxes){
-    if(settledBoxSet.has(box))continue;
-    const minX=Math.floor(box.min.x/STATIC_BOX_GRID_CELL);
-    const maxX=Math.floor(box.max.x/STATIC_BOX_GRID_CELL);
-    const minZ=Math.floor(box.min.z/STATIC_BOX_GRID_CELL);
-    const maxZ=Math.floor(box.max.z/STATIC_BOX_GRID_CELL);
-    const span=(maxX-minX+1)*(maxZ-minZ+1);
-    if(span>64){staticBoxGridLarge.push(box);continue;}
-    for(let gx=minX;gx<=maxX;gx++)for(let gz=minZ;gz<=maxZ;gz++){
-      const key=staticBoxGridKey(gx,gz);
-      let bucket=staticBoxGrid.get(key);
-      if(!bucket){bucket=[];staticBoxGrid.set(key,bucket);}
-      bucket.push(box);
-    }
-  }
+  for(const box of boxes)box._staticGridIndexed=false;
+  for(const box of boxes)indexStaticBox(box);
   staticBoxGridDirty=false;
 }
 function getStaticBoxCandidates(body){
@@ -192,7 +209,9 @@ function getStaticBoxCandidatesAt(position,queryReach){
   const minZ=Math.floor((position.z-reach)/STATIC_BOX_GRID_CELL);
   const maxZ=Math.floor((position.z+reach)/STATIC_BOX_GRID_CELL);
   const append=box=>{
-    if(box.active===false)return;
+    /* Sleeping rigid fragments have their exact OBB path below; a stale hash
+       entry must not turn their conservative AABB into duplicate collision. */
+    if(box.active===false||settledBoxSet.has(box))return;
     if(box._staticGridStamp===stamp)return;
     box._staticGridStamp=stamp;
     playerStaticBoxCandidates.push(box);
@@ -917,6 +936,41 @@ function resolveGround(body){
   }
 }
 
+function setStaticBodyFromBox(box){
+  const owner=box.owner,ownerData=owner&&owner.userData;
+  const oriented=ownerData&&(ownerData.kind==='cell'||ownerData.kind==='roof'||
+    ownerData.kind==='trim'||ownerData.kind==='groupShell'||
+    ownerData.kind==='groupChunk'||ownerData.kind==='actorBody'||
+    ownerData.kind==='actorPart')&&ownerData.size;
+  if(oriented){
+    /* The broadphase uses the cached AABB, but the narrowphase must use the
+       actual piece frame. This keeps a rotated roof, wall fragment, or
+       compound prop from behaving like a larger invisible axis-aligned
+       crate. */
+    staticBody.mesh=owner;
+    owner.updateMatrixWorld(true);
+    staticBody.position.setFromMatrixPosition(owner.matrixWorld);
+    staticBody.half.copy(ownerData.size).multiplyScalar(0.5);
+    staticWorldQuaternion.setFromRotationMatrix(owner.matrixWorld);
+    setAxesFromQuaternion(staticWorldQuaternion,staticBody.axes);
+  }else{
+    staticBody.mesh=null;
+    staticBody.position.set((box.min.x+box.max.x)*0.5,(box.min.y+box.max.y)*0.5,(box.min.z+box.max.z)*0.5);
+    staticBody.half.set((box.max.x-box.min.x)*0.5,(box.max.y-box.min.y)*0.5,(box.max.z-box.min.z)*0.5);
+    staticBody.axes[0].set(1,0,0);staticBody.axes[1].set(0,1,0);staticBody.axes[2].set(0,0,1);
+  }
+  updateChunkBounds(staticBody);
+  const ownerMaterial=ownerData&&ownerData.parent&&ownerData.parent.fractureKind||
+    (ownerData&&ownerData.fractureKind)||'';
+  const materialRestitution=ownerMaterial==='glass'?0.14:
+    (ownerMaterial==='wood'?0.12:(ownerMaterial==='roof'?0.08:DEBRIS_CHUNK_RESTITUTION));
+  const materialFriction=ownerMaterial==='glass'?0.34:
+    (ownerMaterial==='wood'?0.58:(ownerMaterial==='roof'?0.7:DEBRIS_STATIC_FRICTION));
+  staticBody.restitution=ownerData&&ownerData.restitution!==undefined?
+    ownerData.restitution:materialRestitution;
+  staticBody.friction=ownerData&&ownerData.friction!==undefined?
+    ownerData.friction:materialFriction;
+}
 function resolveStaticBoxes(body){
   for(const box of getStaticBoxCandidates(body)){
     if(settledBoxSet.has(box))continue;
@@ -930,38 +984,7 @@ function resolveStaticBoxes(body){
     if(dx*dx+dy*dy+dz*dz>radius*radius)continue;
     const owner=box.owner;
     const ownerData=owner&&owner.userData;
-    const oriented=ownerData&&(ownerData.kind==='cell'||ownerData.kind==='roof'||
-      ownerData.kind==='trim'||ownerData.kind==='groupShell'||
-      ownerData.kind==='groupChunk'||ownerData.kind==='actorBody'||
-      ownerData.kind==='actorPart')&&ownerData.size;
-    if(oriented){
-      /* The broadphase uses the cached AABB, but the narrowphase must use the
-         actual piece frame. This keeps a rotated roof, wall fragment, or
-         compound prop from behaving like a larger invisible axis-aligned
-         crate. */
-      staticBody.mesh=owner;
-      owner.updateMatrixWorld(true);
-      staticBody.position.setFromMatrixPosition(owner.matrixWorld);
-      staticBody.half.copy(ownerData.size).multiplyScalar(0.5);
-      staticWorldQuaternion.setFromRotationMatrix(owner.matrixWorld);
-      setAxesFromQuaternion(staticWorldQuaternion,staticBody.axes);
-    }else{
-      staticBody.mesh=null;
-      staticBody.position.set((box.min.x+box.max.x)*0.5,(box.min.y+box.max.y)*0.5,(box.min.z+box.max.z)*0.5);
-      staticBody.half.set((box.max.x-box.min.x)*0.5,(box.max.y-box.min.y)*0.5,(box.max.z-box.min.z)*0.5);
-      staticBody.axes[0].set(1,0,0);staticBody.axes[1].set(0,1,0);staticBody.axes[2].set(0,0,1);
-    }
-    updateChunkBounds(staticBody);
-    const ownerMaterial=ownerData&&ownerData.parent&&ownerData.parent.fractureKind||
-      (ownerData&&ownerData.fractureKind)||'';
-    const materialRestitution=ownerMaterial==='glass'?0.14:
-      (ownerMaterial==='wood'?0.12:(ownerMaterial==='roof'?0.08:DEBRIS_CHUNK_RESTITUTION));
-    const materialFriction=ownerMaterial==='glass'?0.34:
-      (ownerMaterial==='wood'?0.58:(ownerMaterial==='roof'?0.7:DEBRIS_STATIC_FRICTION));
-    staticBody.restitution=ownerData&&ownerData.restitution!==undefined?
-      ownerData.restitution:materialRestitution;
-    staticBody.friction=ownerData&&ownerData.friction!==undefined?
-      ownerData.friction:materialFriction;
+    setStaticBodyFromBox(box);
     const penetration=findObbContact(body,staticBody);
     if(penetration>=0){
       const kind=ownerData&&ownerData.kind;
@@ -1033,6 +1056,78 @@ function resolveSettledChunks(body){
   }
 }
 
+const chunkMotionStart=V(),chunkMotionDelta=V(),chunkSweepCenter=V();
+const chunkSweptBounds={minX:0,maxX:0,minY:0,maxY:0,minZ:0,maxZ:0,
+  position:chunkSweepCenter,radius:0};
+let sweepEntry=0,sweepExit=1;
+function sweepObbAxis(nx,ny,nz,a,b,dx,dy,dz,motion){
+  if(nx*nx+ny*ny+nz*nz<1e-10)return true;
+  let radius=0;
+  for(let i=0;i<3;i++){
+    const aa=a.axes[i],ba=b.axes[i];
+    radius+=a.half.getComponent(i)*Math.abs(nx*aa.x+ny*aa.y+nz*aa.z)+
+      b.half.getComponent(i)*Math.abs(nx*ba.x+ny*ba.y+nz*ba.z);
+  }
+  const origin=dx*nx+dy*ny+dz*nz;
+  const speed=motion.x*nx+motion.y*ny+motion.z*nz;
+  if(Math.abs(speed)<1e-10)return Math.abs(origin)<=radius;
+  let enter=(-radius-origin)/speed,exit=(radius-origin)/speed;
+  if(enter>exit){const swap=enter;enter=exit;exit=swap;}
+  sweepEntry=Math.max(sweepEntry,enter);sweepExit=Math.min(sweepExit,exit);
+  return sweepEntry<=sweepExit;
+}
+function sweptObbTime(a,b,start,motion){
+  sweepEntry=-Infinity;sweepExit=1;
+  const dx=start.x-b.position.x,dy=start.y-b.position.y,dz=start.z-b.position.z;
+  /* Swept SAT retains all fifteen separating axes. Casting just a bounding
+     sphere would stop long, rotated shards against empty space at corners. */
+  for(let i=0;i<3;i++){
+    const aa=a.axes[i],ba=b.axes[i];
+    if(!sweepObbAxis(aa.x,aa.y,aa.z,a,b,dx,dy,dz,motion)||
+       !sweepObbAxis(ba.x,ba.y,ba.z,a,b,dx,dy,dz,motion))return Infinity;
+  }
+  for(const aa of a.axes)for(const ba of b.axes){
+    if(!sweepObbAxis(aa.y*ba.z-aa.z*ba.y,aa.z*ba.x-aa.x*ba.z,
+      aa.x*ba.y-aa.y*ba.x,a,b,dx,dy,dz,motion))return Infinity;
+  }
+  /* Existing overlap belongs to the contact solver, which also handles the
+     small angular change within this 120 Hz step. */
+  return sweepEntry>=0&&sweepEntry<=1?sweepEntry:Infinity;
+}
+function sweepFastChunk(body,start){
+  chunkMotionDelta.subVectors(body.position,start);
+  const distance=chunkMotionDelta.length();
+  if(distance<Math.max(0.025,Math.min(body.half.x,body.half.y,body.half.z)*0.5))return;
+  const sweep=chunkSweptBounds;
+  const dx=chunkMotionDelta.x,dy=chunkMotionDelta.y,dz=chunkMotionDelta.z;
+  sweep.minX=Math.min(body.minX,body.minX-dx);sweep.maxX=Math.max(body.maxX,body.maxX-dx);
+  sweep.minY=Math.min(body.minY,body.minY-dy);sweep.maxY=Math.max(body.maxY,body.maxY-dy);
+  sweep.minZ=Math.min(body.minZ,body.minZ-dz);sweep.maxZ=Math.max(body.maxZ,body.maxZ-dz);
+  sweep.position.copy(start).addScaledVector(chunkMotionDelta,0.5);
+  sweep.radius=body.radius+distance*0.5;
+  let earliest=Infinity;
+  for(const box of getStaticBoxCandidates(sweep)){
+    if(settledBoxSet.has(box)||box.owner===body.mesh||box.max.y<sweep.minY||
+       box.min.y>sweep.maxY||box.max.x<sweep.minX||box.min.x>sweep.maxX||
+       box.max.z<sweep.minZ||box.min.z>sweep.maxZ)continue;
+    setStaticBodyFromBox(box);
+    earliest=Math.min(earliest,sweptObbTime(body,staticBody,start,chunkMotionDelta));
+  }
+  for(const mesh of getSettledCandidates(sweep)){
+    if(mesh===body.mesh)continue;
+    const other=mesh.userData;
+    if(!other||!other.half||!other.axes)continue;
+    earliest=Math.min(earliest,sweptObbTime(body,other,start,chunkMotionDelta));
+  }
+  if(earliest<Infinity){
+    /* Stop at contact with a sub-millimetre overlap so the ordinary impulse,
+       friction, angular response, and impact damage code owns the collision. */
+    body.position.copy(start).addScaledVector(chunkMotionDelta,
+      Math.min(1,earliest+0.0002/distance));
+    updateChunkBounds(body);
+  }
+}
+
 function simulateChunkStep(dt){
   debrisPhysicsStep=(debrisPhysicsStep+1)%2147483647;
   debrisContactDt=dt;
@@ -1046,6 +1141,7 @@ function simulateChunkStep(dt){
     ud.impactCooldown=Math.max(0,(ud.impactCooldown||0)-dt);
     ud.structuralImpactCooldown=Math.max(0,(ud.structuralImpactCooldown||0)-dt);
     ud.position=c.position;
+    chunkMotionStart.copy(c.position);
     ud.vel.y-=DEBRIS_GRAVITY*dt;
     const drag=Math.pow(DEBRIS_AIR_DRAG,dt*60);
     ud.vel.multiplyScalar(drag);
@@ -1054,6 +1150,7 @@ function simulateChunkStep(dt){
     integrateChunkRotation(c,dt);
     updateChunkAxes(ud);
     updateChunkBounds(ud);
+    sweepFastChunk(ud,chunkMotionStart);
   }
 
   /* Keep the full contact quality for ordinary piles. A saturated collapse
@@ -1305,8 +1402,9 @@ function updateDebrisVisualBudget(){
   for(const c of settledFragments)update(c);
 }
 
-function updateChunks(dt){
-  if(chunks.length||settledFragments.length)updateDebrisVisualBudget();
+function updateChunks(dt,deferVisuals=false){
+  if(!Number.isFinite(dt)||dt<=0)return;
+  if(!deferVisuals&&(chunks.length||settledFragments.length))updateDebrisVisualBudget();
   if(deferredSettledWakes.length)flushDeferredSettledWakes();
   /* The render loop already clamps dt; preserve the full fixed-step backlog so
      debris never gets an artificial time jump or a fake frozen settle. */
@@ -1320,7 +1418,7 @@ function updateChunks(dt){
     }
     return;
   }
-  debrisAccumulator+=Math.max(0,dt);
+  debrisAccumulator+=Math.min(dt,DEBRIS_FIXED_STEP*DEBRIS_MAX_SUBSTEPS);
   releaseFractureChunks(dt);
   if(climbGraphDirty){
     if(climbGraphAddedMeshes.size||climbGraphRemovedMeshes.size)
@@ -1329,36 +1427,10 @@ function updateChunks(dt){
     climbGraphDirty=false;
   }
   let steps=0;
-  while(debrisAccumulator>=DEBRIS_FIXED_STEP&&steps<DEBRIS_MAX_SUBSTEPS){
+  while(debrisAccumulator+1e-10>=DEBRIS_FIXED_STEP&&steps<DEBRIS_MAX_SUBSTEPS){
     simulateChunkStep(DEBRIS_FIXED_STEP);
-    debrisAccumulator-=DEBRIS_FIXED_STEP;
+    debrisAccumulator=Math.max(0,debrisAccumulator-DEBRIS_FIXED_STEP);
     steps++;
   }
   if(deferredSettledWakes.length)flushDeferredSettledWakes();
-}
-
-function updateParticles(dt){
-  if(muzzleLight&&muzzleLight.life!==undefined){
-    muzzleLight.life-=dt;
-    if(muzzleLight.life<=0){muzzleLight.intensity=0;}
-    else muzzleLight.intensity=Math.max(0,muzzleLight.intensity-dt*40);
-  }
-  for(let i=particles.length-1;i>=0;i--){
-    const p=particles[i];
-    p.userData.life-=dt;
-    if(p.userData.vel){
-      p.userData.vel.y-=2*dt;
-      p.position.addScaledVector(p.userData.vel,dt);
-    }
-    const k=p.userData.life/p.userData.lifeMax;
-    p.material.opacity=Math.max(0,k*(p.userData.opacityScale===undefined?0.7:p.userData.opacityScale));
-    const baseScale=p.userData.baseScale===undefined?1:p.userData.baseScale;
-    if(!p.userData.staticScale)p.scale.setScalar(baseScale*(0.6+(1-k)*1.2));
-    if(p.userData.life<=0||p.position.y<0){
-      scene.remove(p);
-      if(!SHARED_GEO.has(p.geometry))p.geometry.dispose();
-      releaseParticleMaterial(p);
-      particles.splice(i,1);
-    }
-  }
 }

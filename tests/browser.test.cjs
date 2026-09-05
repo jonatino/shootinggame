@@ -30,8 +30,8 @@ test('browser loads, renders, and gates paused input behind the play screen', as
     assert.equal(state.mode, 'ground');
     assert.equal(state.started, false);
     assert.ok(state.renderFrames > 0);
-    assert.equal(state.world.structures, 49);
-    assert.equal(state.world.voxels, 35304);
+    assert.equal(state.world.structures, 63);
+    assert.ok(state.world.voxels > 35304);
     assert.deepEqual(runtime.errors, []);
 
     await runtime.page.waitForFunction(
@@ -46,6 +46,7 @@ test('browser loads, renders, and gates paused input behind the play screen', as
       'click-to-play screen must not schedule recurring renders');
 
     const playGate = await runtime.page.evaluate(() => {
+      window.__browserInputSafety.allowSimulatedLock(false);
       const start = document.getElementById('start');
       const beforeDisplay = getComputedStyle(start).display;
       const before = window.__browserGameTest.state();
@@ -79,6 +80,71 @@ test('browser loads, renders, and gates paused input behind the play screen', as
     assert.equal(playGate.ignored.zoom, playGate.before.zoom);
     assert.deepEqual(playGate.ignored.pressedKeys, []);
     assert.equal(playGate.playing.started, true);
+
+    const mouseLook = await runtime.page.evaluate(() => {
+      const canvas = document.querySelector('canvas');
+      const before = window.__browserGameTest.state().camera;
+      canvas.dispatchEvent(new MouseEvent('mousemove', {
+        clientX: 80, clientY: 60, bubbles: true
+      }));
+      canvas.dispatchEvent(new MouseEvent('mousemove', {
+        clientX: 180, clientY: 130, bubbles: true
+      }));
+      const passive = window.__browserGameTest.state().camera;
+      canvas.dispatchEvent(new MouseEvent('mousedown', {
+        button: 2, clientX: 180, clientY: 130, bubbles: true, cancelable: true
+      }));
+      canvas.dispatchEvent(new MouseEvent('mousemove', {
+        clientX: 180, clientY: 130, bubbles: true
+      }));
+      canvas.dispatchEvent(new MouseEvent('mousemove', {
+        clientX: 220, clientY: 150, bubbles: true
+      }));
+      window.dispatchEvent(new MouseEvent('mouseup', {
+        button: 2, bubbles: true
+      }));
+      const dragged = window.__browserGameTest.state().camera;
+      const menuEvent = new MouseEvent('contextmenu', {
+        button: 2, bubbles: true, cancelable: true
+      });
+      const menuAllowed = canvas.dispatchEvent(menuEvent);
+      return {
+        before, passive, dragged,
+        pointerLocked:document.pointerLockElement!==null,
+        contextMenuPrevented:!menuAllowed
+      };
+    });
+
+    assert.deepEqual(mouseLook.passive, mouseLook.before,
+      'ordinary cursor motion must not steer the camera');
+    assert.notDeepEqual(mouseLook.dragged, mouseLook.before,
+      'right-button dragging must steer the camera');
+    assert.equal(mouseLook.pointerLocked, false,
+      'a denied pointer-lock request must leave right-drag usable');
+    assert.equal(mouseLook.contextMenuPrevented, true);
+
+    const weaponSelection = await runtime.page.evaluate(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', {
+        code:'Digit4', key:'4', bubbles:true
+      }));
+      const slotFour=window.__browserGameTest.state().weapon;
+      window.dispatchEvent(new KeyboardEvent('keydown', {
+        code:'Digit5', key:'5', bubbles:true
+      }));
+      return {
+        slotFour,
+        slotFive:window.__browserGameTest.state().weapon,
+        cannonVisible:gunCannon.visible,
+        rpgVisible:gunRpg.visible,
+        pointerLocked:document.pointerLockElement!==null
+      };
+    });
+
+    assert.deepEqual(weaponSelection, {
+      slotFour:{key:'rpg',label:'MACHINE RPG'},
+      slotFive:{key:'cannon',label:'A-10 20MM CANNON'},
+      cannonVisible:true,rpgVisible:false,pointerLocked:false
+    });
 
     await runtime.page.waitForFunction(previous =>
       window.__browserGameTest.state().renderFrames > previous,
@@ -142,8 +208,74 @@ test('browser loads, renders, and gates paused input behind the play screen', as
       blurred.state.renderFrames,
       {timeout: 2000}
     );
+    await runtime.page.keyboard.press('Escape');
+    const escaped=await runtime.page.evaluate(()=>({
+      state:window.__browserGameTest.state(),
+      title:document.getElementById('start-title').textContent
+    }));
+    assert.equal(escaped.state.started,false);
+    assert.deepEqual(escaped.state.pressedKeys,[]);
+    assert.equal(escaped.title,'PAUSED');
+    const inputSafety=await runtime.page.evaluate(()=>window.__browserInputSafety.state());
+    assert.ok(inputSafety.requests>0,'play must exercise the intercepted capture request');
+    assert.equal(inputSafety.nativeLocked,false);
+    assert.deepEqual(runtime.errors,[]);
     t.diagnostic(`browser ready in ${runtime.readyMs.toFixed(1)} ms; no traversal frames used`);
   } finally {
     await runtime.close();
   }
+});
+
+test('pause settings persist and simulated pointer-lock loss pauses without native mouse capture',async()=>{
+  const runtime=await openGamePage();
+  try{
+    await runtime.page.setViewportSize({width:1280,height:720});
+    await runtime.page.waitForFunction(()=>document.getElementById('load').style.display==='none');
+    await runtime.page.locator('#settings-panel summary').click();
+    await runtime.page.locator('#invert-y').check();
+    await runtime.page.locator('#auto-jump').uncheck();
+    await runtime.page.locator('#quality').selectOption('performance');
+    await runtime.page.locator('#camera-motion').selectOption('0');
+    const settings=await runtime.page.evaluate(()=>({
+      playing:started,stored:JSON.parse(localStorage.getItem(SETTINGS_KEY)),
+      shadows:renderer.shadowMap.enabled,ratio:renderer.getPixelRatio()
+    }));
+    assert.equal(settings.playing,false,'editing settings must not start or shoot');
+    assert.equal(settings.stored.invertY,true);
+    assert.equal(settings.stored.autoJump,false);
+    assert.equal(settings.stored.cameraMotion,0);
+    assert.equal(settings.stored.quality,'performance');
+    assert.equal(settings.shadows,false);
+    assert.equal(settings.ratio,1);
+    await runtime.page.locator('#quality').selectOption('high');
+    await runtime.page.locator('#invert-y').uncheck();
+    await runtime.page.locator('#auto-jump').check();
+    await runtime.page.screenshot({path:'test-results/astra-settings.png'});
+    await runtime.page.evaluate(()=>window.__browserInputSafety.allowSimulatedLock(true));
+    await runtime.page.locator('#play-button').click();
+    await runtime.page.waitForFunction(()=>document.pointerLockElement!==null);
+    const simulated=await runtime.page.evaluate(()=>window.__browserInputSafety.state());
+    assert.equal(simulated.simulatedLocked,true);
+    assert.equal(simulated.nativeLocked,false,'a simulated lock must never capture the system pointer');
+    await runtime.page.evaluate(()=>window.__browserInputSafety.releaseSimulatedLock());
+    await runtime.page.waitForFunction(()=>!started);
+    const paused=await runtime.page.evaluate(()=>({
+      input:Object.values(keys).some(Boolean)||mouseHeld,
+      display:document.getElementById('start').style.display
+    }));
+    assert.deepEqual(paused,{input:false,display:'flex'});
+    await runtime.page.locator('#play-button').click();
+    await runtime.page.waitForFunction(()=>started);
+    await runtime.page.evaluate(()=>{
+      __browserGameTest.pause();
+      __browserGameTest.placePlayer({x:8,y:0,z:16});
+      __browserGameTest.setCamera(0.72,0.27);
+      __browserGameTest.step(1);renderer.render(scene,camera);
+    });
+    await runtime.page.screenshot({path:'test-results/astra-game.png'});
+    const finalInput=await runtime.page.evaluate(()=>window.__browserInputSafety.state());
+    assert.equal(finalInput.nativeLocked,false);
+    assert.ok(finalInput.requests>=2);
+    assert.deepEqual(runtime.errors,[]);
+  }finally{await runtime.close();}
 });

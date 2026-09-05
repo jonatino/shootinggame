@@ -46,6 +46,7 @@ class FakeElement {
     this.classList = new FakeClassList();
     this.children = [];
     this.listeners = new Map();
+    this.attributes = new Map();
     this.textContent = '';
     this.width = 0;
     this.height = 0;
@@ -55,6 +56,14 @@ class FakeElement {
   appendChild(child) {
     this.children.push(child);
     return child;
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(String(name), String(value));
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(String(name)) ?? null;
   }
 
   addEventListener(type, listener) {

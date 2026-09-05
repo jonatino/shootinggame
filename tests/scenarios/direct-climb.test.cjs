@@ -28,6 +28,45 @@ test('climb test places a wall directly in front of the player and grabs immedia
   assert.equal(runtime.evaluate('__gameTest.rendererFrames()'), 0);
 });
 
+test('Shift+W follows the crosshair instead of magneting to a side obstacle', () => {
+  const runtime = createRuntime({seed: 52});
+  const result = runtime.json(String.raw`(()=>{
+    const aimThroughRightShoulder=()=>{
+      __gameTest.setCameraYaw(0);
+      camera.position.set(0.55,1.8,5.6);
+      camera.lookAt(new THREE.Vector3(0.55,1.55,0));
+      camera.updateMatrixWorld(true);
+    };
+
+    __gameTest.setPlayer([0,0,0]);
+    aimThroughRightShoulder();
+    __gameTest.addBox({
+      center:[-0.4,0.8,-1.1],size:[1.4,1.6,1.4],
+      climbable:true,standable:true
+    });
+    __gameTest.buildClimbGraph();
+    __gameTest.stepGround(1,[0,0,-1],{forward:true,sprint:true});
+    const sideOnly=__gameTest.playerState();
+
+    __gameTest.clear();
+    __gameTest.setPlayer([0,0,0]);
+    aimThroughRightShoulder();
+    __gameTest.addBox({
+      center:[0.4,2,-0.8],size:[1.4,4,0.25],
+      climbable:true,standable:true
+    });
+    __gameTest.buildClimbGraph();
+    __gameTest.stepGround(1,[0,0,-1],{forward:true,sprint:true});
+    const underCrosshair=__gameTest.playerState();
+    return {sideOnly,underCrosshair};
+  })()`);
+
+  assert.equal(result.sideOnly.mode, 'ground');
+  assert.ok(result.sideOnly.pos[2]<0,
+    'Shift+W should keep sprinting when the climbable surface misses the reticle');
+  assert.equal(result.underCrosshair.mode, 'attach');
+});
+
 test('running off a climbable edge requires explicit climb-down input to reattach', () => {
   const runtime = createRuntime({seed: 31});
   const result = runtime.json(String.raw`(()=>{
@@ -107,6 +146,9 @@ test('a player standing on an object starts climbing at that object height', () 
     __gameTest.buildClimbGraph();
     __gameTest.setPlayer([0,1,0.2]);
     __gameTest.setCameraYaw(0);
+    camera.position.set(0.55,2.8,5.8);
+    camera.lookAt(new THREE.Vector3(0.55,2.55,0.2));
+    camera.updateMatrixWorld(true);
     const startY=player.pos.y;
     tryGrab(false);
     return {

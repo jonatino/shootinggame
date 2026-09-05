@@ -3,7 +3,6 @@ const MIN_GRIP=0.06,STAND_DEPTH=0.32,LIP_MAX=2.3;
 const rc=new THREE.Raycaster();
 const tmpDir=new THREE.Vector3();
 const groundProbeOrigin=V();
-const rocketPrev=V(),rocketTravel=V(),rocketAxis=V();
 const worldNormalScratch=V();
 
 /* Mantle targets are physical footprints, not mathematical points. Voxel
@@ -572,9 +571,11 @@ function refreshClimbGraphIncremental(){
     player.hold=findRemappedHold(oldHold,HOLDS);
     player.moveFrom=findRemappedHold(oldMoveFrom,HOLDS);
     player.moveTo=findRemappedHold(oldMoveTo,HOLDS);
+    const directVault=player.mode==='vault'&&
+      (player.vaultKind==='low'||player.vaultKind==='quick');
     const invalid=player.mode==='attach'?player.moveTo<0:
       player.mode==='move'?(player.moveFrom<0||player.moveTo<0):
-      player.mode==='hang'||player.mode==='vault'?player.hold<0:false;
+      player.mode==='hang'||(player.mode==='vault'&&!directVault)?player.hold<0:false;
     if(invalid)releaseTraversal(oldHold||oldMoveFrom||oldMoveTo);
   }
   climbGraphAddedMeshes.clear();
@@ -598,9 +599,11 @@ function rebuildClimbGraph(computeVault){
     player.hold=findRemappedHold(oldHold,HOLDS);
     player.moveFrom=findRemappedHold(oldMoveFrom,HOLDS);
     player.moveTo=findRemappedHold(oldMoveTo,HOLDS);
+    const directVault=player.mode==='vault'&&
+      (player.vaultKind==='low'||player.vaultKind==='quick');
     const invalid=player.mode==='attach'?player.moveTo<0:
       player.mode==='move'?(player.moveFrom<0||player.moveTo<0):
-      player.mode==='hang'||player.mode==='vault'?player.hold<0:false;
+      player.mode==='hang'||(player.mode==='vault'&&!directVault)?player.hold<0:false;
     if(invalid)releaseTraversal(oldHold||oldMoveFrom||oldMoveTo);
   }
   climbGraphAddedMeshes.clear();

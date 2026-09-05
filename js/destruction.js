@@ -697,7 +697,11 @@ function makeDestructible(w,h,d,x,y,z,mat,opts){
       if(node.isMesh)node.userData=Object.assign({},node.userData,{structuralRoot:root});
     });
   }else{
-    const seg=(s)=>Math.max(1,Math.round(s/1.4));
+    /* Voxel-only structures replace this root immediately after registration.
+       Keep their temporary authoring mesh deliberately coarse: a skyscraper's
+       real facade, collision, and fracture detail all come from the voxel
+       field, so subdividing a hidden 90-metre box only wastes startup memory. */
+    const seg=(s)=>opts.voxelOnly?1:Math.max(1,Math.round(s/1.4));
     root=new THREE.Mesh(new THREE.BoxGeometry(w,h,d,seg(w),seg(h),seg(d)),mat);
     root.position.set(x,y,z);
     root.castShadow=true;root.receiveShadow=true;
@@ -740,6 +744,14 @@ function makeDestructible(w,h,d,x,y,z,mat,opts){
      fracture cells, roofs, and trims. A settled shard resting on a building
      must be wakeable when that building loses its load path. */
   root.userData=Object.assign({},root.userData,{parent:dObj});
+  /* Large procedural structures never use the legacy rigid-cell handoff. The
+     voxel solver below owns their intact and broken states from frame one, so
+     skip hundreds of dormant meshes and geometries that would be discarded by
+     registerVoxelBuilding anyway. */
+  if(opts.voxelOnly){
+    destructibles.push(dObj);
+    return dObj;
+  }
   /* Most structures use a balanced grid, but thin panels benefit from finer
      horizontal cuts without multiplying their vertical courses. Allow an
      asset to request that deliberately; the global active-body cap still

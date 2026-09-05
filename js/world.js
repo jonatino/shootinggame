@@ -95,6 +95,7 @@ function addBox(w,h,d,x,y,z,mat,opt){
       hp:opt.hp,climb:opt.climb,grip:opt.grip,cells:opt.cells,sliceH:opt.sliceH,mass:opt.mass,
       cellsX:opt.cellsX,cellsY:opt.cellsY,cellsZ:opt.cellsZ,maxCellsPerAxis:opt.maxCellsPerAxis,
       fractureKind:opt.fractureKind,
+      voxelOnly:opt.voxelOnly,
       collide:opt.collide,cellClimb:opt.cellClimb,cellGrip:opt.cellGrip,
       cellShell:opt.cellShell!==false
     });
@@ -147,6 +148,56 @@ addBox(12,10,9,12,5,9,M.glass,{
 });
 addBox(12.8,0.5,9.8,12,0.25,9,M.marble,{grip:false,collide:true,destructible:true,hp:80});
 addBox(11.2,0.5,9.8,12,0.78,9,M.marble,{grip:false,destructible:true,hp:80});
+
+/* A ring of genuinely load-bearing towers turns the open test range into a
+   city-scale playground without burying the central combat space. Each setback
+   is its own supported voxel structure: upper tiers rest on the tier below and
+   can come down with it when the foundation is cut away. A coarse 1.6 m grid
+   keeps these huge silhouettes affordable while remaining close enough for the
+   traversal graph's vertical reach. The voxel engine authors contrasting glass
+   window bands, internal floor slabs, and a reinforced core automatically. */
+const skyscrapers=[];
+function skyscraper(name,x,z,material,profile){
+  const tower={name,x,z,height:0,tiers:[]};
+  let baseY=0;
+  for(let i=0;i<profile.length;i++){
+    const tier=profile[i];
+    const tierMaterial=tier.material||material;
+    const dObj=addBox(tier.w,tier.h,tier.d,x,baseY+tier.h*0.5,z,tierMaterial,{
+      destructible:true,voxelOnly:true,collide:true,climb:true,
+      hp:Math.max(320,Math.round(tier.h*18)),
+      voxelSize:tier.voxelSize||1.58,
+      voxelStrength:tier.strength||520,
+      anchorBase:i===0,
+      fractureKind:'masonry'
+    });
+    dObj.skyscraper=tower;
+    dObj.skyscraperTier=i;
+    dObj.voxelStructure.mesh.name=name+' tier '+(i+1);
+    tower.tiers.push(dObj);
+    baseY+=tier.h;
+  }
+  tower.height=baseY;
+  skyscrapers.push(tower);
+  return tower;
+}
+
+skyscraper('Northwest Spire',-58,-55,M.towerBlue,[
+  {w:24,d:22,h:30},{w:20,d:18,h:26,material:M.towerSteel},
+  {w:15,d:14,h:20},{w:7,d:7,h:11,voxelSize:1.38}
+]);
+skyscraper('East Exchange',62,-56,M.towerSteel,[
+  {w:26,d:18,h:34},{w:21,d:15,h:24,material:M.towerBlue},
+  {w:11,d:9,h:12,voxelSize:1.45}
+]);
+skyscraper('Emerald Needle',70,56,M.towerTeal,[
+  {w:22,d:22,h:38},{w:17,d:17,h:30,material:M.towerSteel},
+  {w:11,d:11,h:20},{w:5,d:5,h:10,voxelSize:1.32}
+]);
+skyscraper('Westgate Tower',-66,61,M.towerWarm,[
+  {w:28,d:16,h:42},{w:20,d:12,h:23,material:M.towerSteel},
+  {w:8,d:8,h:10,voxelSize:1.42}
+]);
 
 (function scaffold(){
   const sites=[{x:-6,z:5},{x:22,z:18},{x:-25,z:-22}];
@@ -438,11 +489,11 @@ function makeDummy(x,z){
 for(const s of[[10,5],[-15,5],[20,-15],[-20,25],[5,-30],[30,30],[-35,-25],[0,25]])makeDummy(s[0],s[1]);
 
 const pickups=[];
-function makePickup(kind,x,z){
-  const colors={health:M.green,ammo:M.metal,pistol:M.wood,rifle:M.metal,shotgun:M.woodDark};
-  const sizes={health:[0.6,0.6,0.6],ammo:[0.5,0.5,0.5],pistol:[0.18,0.4,0.18],rifle:[0.18,0.4,0.18],shotgun:[0.2,0.4,0.2]};
+function makePickup(kind,x,z,y=0){
+  const colors={health:M.green,pistol:M.wood,rifle:M.metal,shotgun:M.woodDark};
+  const sizes={health:[0.6,0.6,0.6],pistol:[0.18,0.4,0.18],rifle:[0.18,0.4,0.18],shotgun:[0.2,0.4,0.2]};
   const g=new THREE.Group();
-  g.position.set(x,0.5,z);
+  g.position.set(x,y+0.5,z);
   const b=new THREE.Mesh(new THREE.BoxGeometry(...sizes[kind]),colors[kind]);
   b.castShadow=true;g.add(b);
   if(kind==='health'){
@@ -453,11 +504,11 @@ function makePickup(kind,x,z){
     tag.position.y=0.18;g.add(tag);
   }
   scene.add(g);
-  pickups.push({group:g,box:b,kind,pos:V(x,0,z),alive:true,respawn:0});
+  pickups.push({group:g,box:b,kind,pos:V(x,y,z),alive:true,respawn:0});
 }
 const pickupSpots=[
   ['health',5,0],['health',-15,8],['health',20,30],['health',-25,-20],
-  ['ammo',8,8],['ammo',-10,20],['ammo',25,-15],['ammo',-5,-35],
+  ['health',8,8],['health',-10,20],['health',25,-15],['health',-5,-35],
   ['pistol',-5,-2],['rifle',18,12],['shotgun',-30,30]
 ];
 for(const p of pickupSpots)makePickup(p[0],p[1],p[2]);

@@ -204,13 +204,57 @@ const rpgSight=bodyBox(0.02,0.05,0.02,M.dark);
 rpgSight.position.set(0,0.13,-0.4);gunRpg.add(rpgSight);
 const rpgRear=bodyBox(0.12,0.12,0.08,M.dark);
 rpgRear.position.set(0,0.02,0.32);gunRpg.add(rpgRear);
+/* A drum and exposed feed rack make the rapid-fire launcher readable from the
+   chase camera instead of looking like the original single-shot tube. */
+const rpgDrum=new THREE.Mesh(new THREE.CylinderGeometry(0.13,0.13,0.11,12),M.dark);
+rpgDrum.rotation.z=Math.PI/2;rpgDrum.position.set(0,-0.12,-0.03);
+rpgDrum.castShadow=true;gunRpg.add(rpgDrum);
+const rpgFeed=bodyBox(0.05,0.08,0.34,M.metal);
+rpgFeed.position.set(-0.1,-0.055,-0.12);rpgFeed.rotation.z=-0.16;gunRpg.add(rpgFeed);
+for(let i=0;i<4;i++){
+  const round=new THREE.Mesh(new THREE.CylinderGeometry(0.025,0.025,0.075,7),M.rpg);
+  round.rotation.x=Math.PI/2;
+  round.position.set(-0.105,-0.02-i*0.035,-0.23+i*0.075);
+  round.castShadow=true;gunRpg.add(round);
+}
 gunGroup.add(gunRpg);
+
+const gunCannon=new THREE.Group();
+const cannonReceiver=bodyBox(0.2,0.18,0.44,M.dark);
+cannonReceiver.position.set(0,0,0.13);gunCannon.add(cannonReceiver);
+const cannonStock=bodyBox(0.16,0.2,0.22,M.metal);
+cannonStock.position.set(0,0,0.39);gunCannon.add(cannonStock);
+const cannonGrip=bodyBox(0.09,0.18,0.09,M.woodDark);
+cannonGrip.position.set(0,-0.15,0.18);gunCannon.add(cannonGrip);
+const cannonDrum=new THREE.Mesh(new THREE.CylinderGeometry(0.16,0.16,0.16,14),M.metal);
+cannonDrum.rotation.z=Math.PI/2;cannonDrum.position.set(0.15,-0.08,0.14);
+cannonDrum.castShadow=true;gunCannon.add(cannonDrum);
+/* Six long barrels rotate as one assembly around the weapon's local -Z axis. */
+const cannonRotor=new THREE.Group();
+for(let i=0;i<6;i++){
+  const angle=i*Math.PI/3;
+  const barrel=new THREE.Mesh(new THREE.CylinderGeometry(0.018,0.018,0.76,7),M.metal);
+  barrel.rotation.x=Math.PI/2;
+  barrel.position.set(Math.cos(angle)*0.057,Math.sin(angle)*0.057,-0.46);
+  barrel.castShadow=true;barrel.userData.cannonBarrel=true;
+  cannonRotor.add(barrel);
+}
+const cannonMuzzleRing=new THREE.Mesh(new THREE.TorusGeometry(0.075,0.016,6,12),M.dark);
+cannonMuzzleRing.rotation.x=Math.PI/2;cannonMuzzleRing.position.z=-0.8;
+cannonMuzzleRing.castShadow=true;cannonRotor.add(cannonMuzzleRing);
+const cannonRearRing=new THREE.Mesh(new THREE.TorusGeometry(0.075,0.02,6,12),M.dark);
+cannonRearRing.rotation.x=Math.PI/2;cannonRearRing.position.z=-0.12;
+cannonRearRing.castShadow=true;cannonRotor.add(cannonRearRing);
+gunCannon.add(cannonRotor);
+let cannonRotorSpeed=0;
+gunGroup.add(gunCannon);
 
 function updateGunVisual(){
   gunPistol.visible=playerWpn.cur==='pistol';
   gunRifle.visible=playerWpn.cur==='rifle';
   gunShotgun.visible=playerWpn.cur==='shotgun';
   gunRpg.visible=playerWpn.cur==='rpg';
+  gunCannon.visible=playerWpn.cur==='cannon';
 }
 updateGunVisual();
 
@@ -231,13 +275,15 @@ const weaponHoldProfiles={
   pistol:{mount:[-0.62,1.34,0.12],primary:[0,-0.05,-0.03],support:null,offHand:[0.35,0.82,0.02],primaryGrip:gripPrimaryQ},
   rifle:{mount:[-0.44,1.34,0.19],primary:[0,-0.07,0.14],support:[-0.05,-0.03,-0.18],primaryGrip:gripPrimaryQ,supportGrip:gripSupportQ},
   shotgun:{mount:[-0.43,1.34,0.18],primary:[0,-0.07,0.22],support:[-0.05,-0.025,-0.25],primaryGrip:gripPrimaryQ,supportGrip:gripSupportQ},
-  rpg:{mount:[-0.4,1.37,0.17],primary:[0,-0.07,0.05],support:[-0.04,-0.015,-0.28],primaryGrip:gripPrimaryQ,supportGrip:gripSupportQ}
+  rpg:{mount:[-0.4,1.37,0.17],primary:[0,-0.07,0.05],support:[-0.04,-0.015,-0.28],primaryGrip:gripPrimaryQ,supportGrip:gripSupportQ},
+  cannon:{mount:[-0.42,1.35,0.19],primary:[0,-0.09,0.18],support:[-0.06,-0.02,-0.24],primaryGrip:gripPrimaryQ,supportGrip:gripSupportQ}
 };
 const weaponMuzzlePoints={
   pistol:[0,0.02,-0.21],
   rifle:[0,0,-0.58],
   shotgun:[0,0.01,-0.62],
-  rpg:[0,0.02,-0.82]
+  rpg:[0,0.02,-0.82],
+  cannon:[0,0,-0.86]
 };
 const ikShoulder=V(),ikReach=V(),ikDirection=V(),ikEffectiveTarget=V(),ikBend=V();
 const ikElbow=V(),ikUpperDir=V(),ikLowerDir=V();
@@ -629,8 +675,16 @@ function updateGuy(dt){
   const vaultRecover=mode==='ground'&&player.vaultRecovery>0;
   const vaulting=mode==='vault'||vaultRecover;
   const lowVault=vaulting&&player.vaultKind==='low';
+  const quickClimb=vaulting&&player.vaultKind==='quick';
   const vaultK=vaulting?(mode==='vault'?Math.max(0,Math.min(1,player.vaultT)):1):0;
   const vaultArc=4*vaultK*(1-vaultK);
+  const quickMotionT=quickClimb?Math.max(0,Math.min(1,
+    (vaultK-QUICK_CLIMB_PLANT_PHASE)/(1-QUICK_CLIMB_PLANT_PHASE))):0;
+  const quickMotionRemaining=1-quickMotionT;
+  const quickPullArc=quickClimb?
+    16*quickMotionT*quickMotionT*quickMotionRemaining*quickMotionRemaining:0;
+  const quickPlant=quickClimb?smooth5(Math.max(0,Math.min(1,
+    vaultK/QUICK_CLIMB_APPROACH_END))):0;
   const vaultHeightBlend=lowVault?Math.max(0,Math.min(1,
     (player.vaultObstacleHeight-LOW_VAULT_MIN_HEIGHT)/
     (LOW_VAULT_MAX_HEIGHT-LOW_VAULT_MIN_HEIGHT))):0;
@@ -696,16 +750,25 @@ function updateGuy(dt){
      joints as two fixed pins. The positional shift is deliberately small; it
      gives the IK chain room to pull through the shoulder without making the
      arms detach from the vest. */
+  const quickShoulderLoad=quickPlant*0.018+quickPullArc*0.04;
   const shoulderLoadL=climbing?climbLiftL*0.035:(vaulting?
-    (lowVault?(lowVaultPlantLeft?0.065:0.022):(player.vaultLeadLeft?0.045:0.018)):0);
+    (lowVault?(lowVaultPlantLeft?0.065:0.022):
+      (quickClimb?quickShoulderLoad*(player.vaultLeadLeft?1:0.72):
+        (player.vaultLeadLeft?0.045:0.018))):0);
   const shoulderLoadR=climbing?climbLiftR*0.035:(vaulting?
-    (lowVault?(lowVaultPlantLeft?0.022:0.065):(player.vaultLeadLeft?0.018:0.045)):0);
+    (lowVault?(lowVaultPlantLeft?0.022:0.065):
+      (quickClimb?quickShoulderLoad*(player.vaultLeadLeft?0.72:1):
+        (player.vaultLeadLeft?0.018:0.045))):0);
   const groundShoulderLift=walking?gait*(0.035+runGait*0.04):0;
   const groundShoulderTravel=walking?gaitCos*(0.03+runGait*0.05):0;
   /* A mantle owns both hands until its landing recovery is finished. Treating
      that frame as a weapon-ready pose let the shoulder rig fight the vault
      brace and was a common source of a one-frame arm pop. */
   const weaponReady=mode==='ground'&&player.onGround&&!vaulting?1:0;
+  const cannonTrigger=weaponReady&&playerWpn.cur==='cannon'&&mouseHeld;
+  cannonRotorSpeed=dampValue(cannonRotorSpeed,cannonTrigger?46:0,
+    cannonTrigger?18:8,dt);
+  cannonRotor.rotation.z=(cannonRotor.rotation.z+cannonRotorSpeed*dt)%(Math.PI*2);
   const recoilLoad=weaponReady?Math.min(1.35,weaponRecoilKick):0;
   const recoilPitch=weaponReady?weaponRecoilPitch:0;
   const recoilRoll=weaponReady?weaponRecoilRoll:0;
@@ -764,7 +827,11 @@ function updateGuy(dt){
        directly into that camera. */
     targetHeading=Math.atan2(-player.vaultNormal.x,-player.vaultNormal.z);
   }
-  heading=dampAngle(heading,targetHeading,14,dt);
+  /* Ground aim needs to follow a mouse turn more tightly than the heavier
+     wall/vault pose. It is still damped, so a fast camera sweep produces a
+     readable Fortnite-style turn instead of snapping the entire rig. */
+  const headingRate=mode==='ground'&&!vaulting?22:14;
+  heading=dampAngle(heading,targetHeading,headingRate,dt);
   guy.rotation.y=heading;
 
   camera.getWorldDirection(aimWorld);
@@ -853,16 +920,20 @@ function updateGuy(dt){
   }else if(vaulting){
     targetTiltX=lowVault?
       0.2+vaultArc*(0.17+vaultSpeedBlend*0.08)-vaultLandingLoad*0.075:
-      0.16+vaultArc*0.14-vaultLandingLoad*0.05;
+      (quickClimb?0.055+quickPlant*0.075+quickPullArc*0.16-
+        vaultLandingLoad*0.065:
+        0.16+vaultArc*0.14-vaultLandingLoad*0.05);
     targetTiltZ=lowVault?
       lowVaultSide*Math.sin(vaultK*Math.PI)*(0.075+vaultHeightBlend*0.045):
-      0.035+Math.sin(vaultK*Math.PI)*0.025;
+      (quickClimb?(player.vaultLeadLeft?1:-1)*
+        Math.sin(quickMotionT*Math.PI)*0.045:
+        0.035+Math.sin(vaultK*Math.PI)*0.025);
   }else{
     targetTiltX=Math.max(-0.08,Math.min(0.2,
       forwardLoad*0.08+movementAccel*0.025+accelForward*0.045+(sprinting?0.07:(walking?0.025:0))+
       (inAir?-0.08:0)-landingKick*0.1-recoilLoad*0.045));
     targetTiltZ=Math.max(-0.14,Math.min(0.14,
-      camRollTarget*0.65-sideLoad*0.035+turnLoad*0.045+recoilRoll*0.25));
+      -sideLoad*0.035+turnLoad*0.045+recoilRoll*0.25));
   }
   tilt.rotation.x=dampValue(tilt.rotation.x,targetTiltX,10,dt);
   tilt.rotation.z=dampValue(tilt.rotation.z,targetTiltZ,10,dt);
@@ -876,12 +947,14 @@ function updateGuy(dt){
   pack.position.y=1.28+breath*0.5;
 
   const pelvisBob=climbing?Math.sin(now*1.8)*0.012-climbCompression*0.04:
-    (vaulting?vaultArc*(lowVault?0.075:0.03)-vaultLandingLoad*(lowVault?0.085:0.06):
+    (vaulting?(quickClimb?quickPullArc*0.052:
+      vaultArc*(lowVault?0.075:0.03))-vaultLandingLoad*(lowVault?0.085:0.06):
       bodyBounce*0.45-landingKick*0.055);
   pelvis.position.y=dampValue(pelvis.position.y,0.92+pelvisBob,14,dt);
   pelvis.position.x=dampValue(pelvis.position.x,gaitWeightShift,16,dt);
   pelvis.rotation.x=dampValue(pelvis.rotation.x,
-    climbing?0.04-climbLoad*0.08:(vaulting?(lowVault?0.08+vaultArc*0.07:0.025):
+    climbing?0.04-climbLoad*0.08:(vaulting?(lowVault?0.08+vaultArc*0.07:
+      (quickClimb?0.025+quickPullArc*0.085:0.025)):
       gaitPitch-recoilLoad*0.018),10,dt);
   pelvis.rotation.y=dampAngle(pelvis.rotation.y,
     climbing?(0.08-0.16*climbTransfer)*climbLoad:
@@ -894,7 +967,8 @@ function updateGuy(dt){
   torso.position.x=dampValue(torso.position.x,-gaitWeightShift*0.42,14,dt);
   torso.rotation.x=dampValue(torso.rotation.x,climbing?-0.07:
     (vaulting?(lowVault?-0.18-vaultArc*0.09-vaultLandingLoad*0.1:
-      -0.12-vaultLandingLoad*0.08):
+      (quickClimb?-0.08-quickPlant*0.055-quickPullArc*0.13-
+        vaultLandingLoad*0.08:-0.12-vaultLandingLoad*0.08)):
       (inAir?0.06:-gaitPitch*0.55-landingKick*0.14-recoilLoad*0.07)+weaponReady*aimPitch*0.08),10,dt);
   torso.rotation.y=dampAngle(torso.rotation.y,
       climbing?aimYaw*0.12+climbCycle*0.1-climbLoad*0.12:
@@ -981,10 +1055,13 @@ function updateGuy(dt){
       Math.abs(camPitchKick)*0.025+landingKick*0.025+recoilLoad*0.014,16,dt);
     gunGroup.position.z=dampValue(gunGroup.position.z,profile.mount[2]+recoilZ+sprintZ+swayZ-movementWeaponPush,16,dt);
     const weaponAimYaw=Math.max(-1.35,Math.min(1.35,aimYaw));
-    /* Local weapon forward is -Z, so its pitch sign is opposite the camera aim angle. */
-    const weaponAimPitch=-aimPitch+kickRatio*(playerWpn.cur==='rpg'?0.08:0.045)+
-      weaponSprint*0.33+recoilPitch*0.72+swayPitch;
-    /* Weapon meshes point along local -Z; rotate 180° onto the character's +Z forward axis. */
+    /* Weapon meshes point along local -Z and are yawed 180° onto the
+       character's +Z axis below. That yaw also reverses the effective pitch
+       axis: the camera aim angle keeps its sign, while an upward recoil impulse
+       subtracts from it. The previous double-negation made looking down tilt
+       the visible barrel up even though the projectile still hit the reticle. */
+    const weaponAimPitch=aimPitch-kickRatio*(playerWpn.cur==='rpg'?0.08:0.045)+
+      weaponSprint*0.33-recoilPitch*0.72+swayPitch;
     gunGroup.rotation.y=dampAngle(gunGroup.rotation.y,weaponAimYaw+Math.PI,18,dt);
     gunGroup.rotation.x=dampValue(gunGroup.rotation.x,weaponAimPitch,18,dt);
     gunGroup.rotation.z=dampValue(gunGroup.rotation.z,swayRoll-weaponSprint*0.18-
@@ -1119,13 +1196,19 @@ function updateGuy(dt){
     /* A mantle plants both hands on its lip. A running low vault instead uses
        one early weight-bearing palm while the other arm counter-swings; which
        side plants alternates with the lead leg so chained vaults stay alive. */
-    const vaultHold=lowVault?null:HOLDS[player.hold];
+    const vaultHold=(lowVault||quickClimb)?null:HOLDS[player.hold];
     /* The wrist follows the same lead/trail schedule as the hand target. If
        both palms rotate together, the lead hand leaves the lip while still
        facing the wall and the forearm twists through the chest on release. */
-    const releaseLead=smooth5(Math.max(0,Math.min(1,(vaultK-0.18)/0.32)));
-    const releaseTrail=smooth5(Math.max(0,Math.min(1,(vaultK-0.28)/0.34)));
-    const handPush=vaultArc*0.08;
+    const leadReleaseStart=quickClimb?0.26:0.18;
+    const trailReleaseStart=quickClimb?0.34:0.28;
+    const releaseLead=smooth5(Math.max(0,Math.min(1,
+      (vaultK-leadReleaseStart)/(quickClimb?0.24:0.32))));
+    const releaseTrail=smooth5(Math.max(0,Math.min(1,
+      (vaultK-trailReleaseStart)/(quickClimb?0.25:0.34))));
+    /* Pull-up palms stay fixed while they bear weight. Their old eight-centimetre
+       vertical slide was especially visible now that the root pauses to plant. */
+    const handPush=quickClimb?quickPullArc*0.018:vaultArc*0.08;
     if(lowVault){
       const plantEngage=smooth5(Math.max(0,Math.min(1,vaultK/0.13)));
       const plantRelease=smooth5(Math.max(0,Math.min(1,(vaultK-0.38)/0.25)));
@@ -1156,6 +1239,29 @@ function updateGuy(dt){
       }
       bendVaultL.set(1.02,-0.12,lowVaultPlantLeft?-0.7:-0.46);
       bendVaultR.set(-1.02,-0.12,lowVaultPlantLeft?-0.46:-0.7);
+    }else if(quickClimb){
+      /* A standing pull-up has no graph hold, but its probe records the exact
+         lip contact. Both palms carry the first lift; the lead releases as its
+         knee commits to the top and the trailing palm finishes the push. */
+      bendVaultL.set(1,-0.08,-0.55);
+      bendVaultR.set(-1,-0.08,-0.55);
+      climbSideAxis.crossVectors(UP,player.vaultNormal);
+      if(climbSideAxis.lengthSq()<0.04)climbSideAxis.set(1,0,0);
+      else climbSideAxis.normalize();
+      vaultHandWorldL.copy(player.vaultContactPoint)
+        .addScaledVector(player.vaultNormal,0.1)
+        .addScaledVector(climbSideAxis,-0.2)
+        .addScaledVector(UP,handPush);
+      vaultHandWorldR.copy(player.vaultContactPoint)
+        .addScaledVector(player.vaultNormal,0.1)
+        .addScaledVector(climbSideAxis,0.2)
+        .addScaledVector(UP,handPush*0.7);
+      toTiltLocal(vaultHandWorldL,handTargetL);
+      toTiltLocal(vaultHandWorldR,handTargetR);
+      vaultBraceL.set(0.28,1.22+handPush,0.34+handPush);
+      vaultBraceR.set(-0.28,1.17+handPush*0.7,0.37+handPush);
+      handTargetL.lerp(vaultBraceL,player.vaultLeadLeft?releaseLead:releaseTrail);
+      handTargetR.lerp(vaultBraceR,player.vaultLeadLeft?releaseTrail:releaseLead);
     }else if(vaultHold){
       bendVaultL.set(1,-0.08,-0.55);
       bendVaultR.set(-1,-0.08,-0.55);
@@ -1195,13 +1301,15 @@ function updateGuy(dt){
       vaultHandNormal.copy(UP).lerp(player.vaultLandingNormal,vaultK).normalize();
       poseHandToSurface(lowVaultPlantLeft?armR:armL,vaultHandNormal,limbBlend*0.7);
     }else{
-      vaultHandNormal.copy(vaultHold?climbSurfaceNormal:player.vaultNormal).normalize();
+      vaultHandNormal.copy(quickClimb?player.vaultContactNormal:
+        (vaultHold?climbSurfaceNormal:player.vaultNormal)).normalize();
       vaultHandNormal.lerp(player.vaultLandingNormal,
         player.vaultLeadLeft?releaseLead:releaseTrail);
       if(vaultHandNormal.lengthSq()<0.01)vaultHandNormal.copy(player.vaultLandingNormal);
       vaultHandNormal.normalize();
       poseHandToSurface(armL,vaultHandNormal,limbBlend);
-      vaultHandNormal.copy(vaultHold?climbSurfaceNormal:player.vaultNormal).normalize();
+      vaultHandNormal.copy(quickClimb?player.vaultContactNormal:
+        (vaultHold?climbSurfaceNormal:player.vaultNormal)).normalize();
       vaultHandNormal.lerp(player.vaultLandingNormal,
         player.vaultLeadLeft?releaseTrail:releaseLead);
       if(vaultHandNormal.lengthSq()<0.01)vaultHandNormal.copy(player.vaultLandingNormal);
@@ -1212,22 +1320,30 @@ function updateGuy(dt){
        stagger prevents the symmetric tucked-leg pose that made the old vault
        read like a teleport, especially on short ledges. */
     const leadT=lowVault?smooth5(Math.max(0,Math.min(1,(vaultK-0.04)/0.72))):
-      smooth5(Math.max(0,Math.min(1,(vaultK-0.14)/0.66)));
+      (quickClimb?smooth5(Math.max(0,Math.min(1,(vaultK-0.2)/0.62))):
+        smooth5(Math.max(0,Math.min(1,(vaultK-0.14)/0.66))));
     const leadLiftPhase=smooth5(Math.max(0,Math.min(1,
-      (vaultK-(lowVault?0.04:0.12))/(lowVault?0.62:0.64))));
+      (vaultK-(lowVault?0.04:(quickClimb?0.18:0.12)))/
+      (lowVault?0.62:(quickClimb?0.62:0.64)))));
     const trailLiftPhase=smooth5(Math.max(0,Math.min(1,
-      (vaultK-(lowVault?0.16:0.24))/(lowVault?0.62:0.6))));
-    const leadLift=Math.sin(Math.PI*leadLiftPhase)*(lowVault?0.18+vaultHeightBlend*0.07:0.13);
-    const trailLift=Math.sin(Math.PI*trailLiftPhase)*(lowVault?0.1+vaultHeightBlend*0.05:0.06);
+      (vaultK-(lowVault?0.16:(quickClimb?0.34:0.24)))/
+      (lowVault?0.62:(quickClimb?0.56:0.6)))));
+    const leadLift=Math.sin(Math.PI*leadLiftPhase)*(lowVault?
+      0.18+vaultHeightBlend*0.07:(quickClimb?0.22:0.13));
+    const trailLift=Math.sin(Math.PI*trailLiftPhase)*(lowVault?
+      0.1+vaultHeightBlend*0.05:(quickClimb?0.12:0.06));
+    const bodyArc=quickClimb?quickPullArc:vaultArc;
     const leadZ=lowVault?
       lerp(-0.13,0.48,leadT)+vaultArc*(0.22+vaultSpeedBlend*0.08):
-      lerp(-0.1,0.3,leadT)+vaultArc*0.2;
+      lerp(-0.1,quickClimb?0.38:0.3,leadT)+bodyArc*(quickClimb?0.16:0.2);
     const trailZ=lowVault?
       lerp(-0.2,0.2,leadT)+vaultArc*(0.12+vaultSpeedBlend*0.05):
-      lerp(-0.16,0.12,leadT)+vaultArc*0.14;
-    const leadY=0.1+vaultArc*(lowVault?0.58+vaultHeightBlend*0.16:0.43)+
+      lerp(-0.16,quickClimb?0.18:0.12,leadT)+bodyArc*(quickClimb?0.11:0.14);
+    const leadY=0.1+bodyArc*(lowVault?0.58+vaultHeightBlend*0.16:
+      (quickClimb?0.48:0.43))+
       leadLift-vaultLandingLoad*(lowVault?0.09:0.06);
-    const trailY=0.1+vaultArc*(lowVault?0.43+vaultHeightBlend*0.13:0.34)+
+    const trailY=0.1+bodyArc*(lowVault?0.43+vaultHeightBlend*0.13:
+      (quickClimb?0.37:0.34))+
       trailLift-vaultLandingLoad*(lowVault?0.075:0.05);
     const leadX=0.14+(lowVault?0.055+vaultSpeedBlend*0.035:0);
     const trailX=0.14-(lowVault?vaultArc*0.025:0);
@@ -1343,15 +1459,18 @@ function updateGuy(dt){
   updateHandDetail(armR,handState,dt);
 }
 
+let cameraShakePhase=0;
+const cameraObstructionHits=[];
 function updateCam(dt){
+  const motion=gameSettings.cameraMotion;
+  cameraShakePhase+=dt;
   const k=1-Math.exp(-14*dt);
   camYaw+=angDiff(targetYaw,camYaw)*k;
   camPitch+=(targetPitch-camPitch)*k;
-  camRoll+=(camRollTarget-camRoll)*Math.min(1,dt*6);
-  const lowVaultCameraRecovery=player.mode==='ground'&&player.vaultRecovery>0&&
-    player.vaultKind==='low';
+  const directVaultCameraRecovery=player.mode==='ground'&&player.vaultRecovery>0&&
+    (player.vaultKind==='low'||player.vaultKind==='quick');
   const traversalCamera=player.mode==='attach'||player.mode==='move'||player.mode==='hang'||player.mode==='vault'||
-    (player.mode==='ground'&&player.grace>0&&player.hold>=0)||lowVaultCameraRecovery;
+    (player.mode==='ground'&&player.grace>0&&player.hold>=0)||directVaultCameraRecovery;
   /* Bring the chase camera in slightly during traversal. The character is
      doing precise hand/foot work against a surface; keeping the normal combat
      distance made the arms sub-pixel at the exact moment their contact pose
@@ -1377,7 +1496,8 @@ function updateCam(dt){
   const L=camTmp2.length()||1;
   camTmp2.divideScalar(L);
   rc.set(camTmp1,camTmp2);rc.far=L;rc.near=0.05;
-  const hits=rc.intersectObjects(getCameraOccluderCandidates(camTmp1,camTmp2,L),false);
+  cameraObstructionHits.length=0;
+  const hits=rc.intersectObjects(getCameraOccluderCandidates(camTmp1,camTmp2,L),false,cameraObstructionHits);
   let d=L,hardHit=null,softHit=null;
   cameraFadeHits.length=0;
   for(const hit of hits){
@@ -1394,7 +1514,7 @@ function updateCam(dt){
   }
   /* Obstructions may pull the camera closer along its requested ray, but may
      never choose another azimuth. Only mouse input is allowed to turn view. */
-  if(hardHit)d=Math.max(1.15,hardHit.distance-0.35);
+  if(hardHit)d=Math.max(0.08,hardHit.distance-0.35);
   /* Moving rubble is a soft obstruction, but it still occupies the line
      between the player and the chase camera. Stop before the first piece so
      the camera cannot drift into a settled pile while the material fades. */
@@ -1405,16 +1525,20 @@ function updateCam(dt){
     d=Math.max(2.15,softHit.distance-0.42);
   }
   updateCameraFade(cameraFadeHits);
-  const bob=camBobAmt*Math.sin(bobPhase);
-  /* smooth the held-out distance toward the computed one for weighty feel */
-  heldDist+=(d-heldDist)*(1-Math.exp(-10*dt));
+  /* A new wall must shorten the boom immediately. Smoothing inward left the
+     camera on the far side of thin walls for several frames after a turn.
+     Smooth only the return to open space, retaining the user's view angle. */
+  if(d<heldDist)heldDist=d;
+  else heldDist+=(d-heldDist)*(1-Math.exp(-10*dt));
   camera.position.copy(camTmp1).addScaledVector(camTmp2,heldDist);
   resolveCameraPosition(camera.position,cameraFadeMesh);
-  camera.position.y+=bob;
   if(camShake>0){
-    camera.position.x+=(Math.random()-0.5)*camShake;
-    camera.position.y+=(Math.random()-0.5)*camShake;
-    camera.position.z+=(Math.random()-0.5)*camShake;
+    /* Presentation must not consume the gameplay random stream: changing
+       refresh rate or disabling shake must not change fracture impulses. */
+    const shake=camShake*motion*0.5;
+    camera.position.x+=Math.sin(cameraShakePhase*113)*shake;
+    camera.position.y+=Math.sin(cameraShakePhase*127+1.7)*shake;
+    camera.position.z+=Math.sin(cameraShakePhase*97+0.4)*shake;
     camShake=Math.max(0,camShake-dt*2.5);
   }
   /* look a little ahead of travel for a more dynamic feel */
@@ -1423,22 +1547,21 @@ function updateCam(dt){
   camTmp3.y+=0.25;
   camTmp3.z-=Math.sin(camYaw)*0.55;
   camera.lookAt(camTmp3);
-  camera.rotation.z+=camRoll;
-  camera.rotation.x+=camPitchKick;
-  camera.rotation.y+=camYawKick;
-  camPitchKick*=(1-Math.min(1,dt*8));
-  camYawKick*=(1-Math.min(1,dt*8));
+  camera.rotation.x+=camPitchKick*motion;
+  camera.rotation.y+=camYawKick*motion;
+  camPitchKick*=Math.exp(-dt*8);
+  camYawKick*=Math.exp(-dt*8);
   camFovKick=Math.max(0,camFovKick-dt*8);
   /* game-loop deliberately clears the sprint flag while a vault owns root
      motion. Preserve the FOV contribution from the entry velocity so a fast
      manual vault does not visibly zoom inward at takeoff and back out at the
      landing frame. */
   const lowVaultFovActive=player.vaultKind==='low'&&
-    (player.mode==='vault'||lowVaultCameraRecovery);
+    (player.mode==='vault'||directVaultCameraRecovery);
   const lowVaultFovBlend=lowVaultFovActive?Math.max(0,Math.min(1,
     (player.vaultEntrySpeed-PLAYER_WALK_SPEED)/
     Math.max(0.01,PLAYER_SPRINT_SPEED-PLAYER_WALK_SPEED))):0;
-  const baseFov=75+Math.max(sprintCameraBlend,lowVaultFovBlend)*8+camFovKick;
+  const baseFov=75+(Math.max(sprintCameraBlend,lowVaultFovBlend)*8+camFovKick)*motion;
   curFov+=(baseFov-curFov)*(1-Math.exp(-8*dt));
   if(camera.fov!==curFov){
     camera.fov=curFov;

@@ -30,6 +30,9 @@ async function openGamePage() {
       headless: true
     });
     const context = await browser.newContext({viewport: {width: 480, height: 270}});
+    /* This applies to every page/frame and every navigation, before game code.
+       Never permit a test to call native pointer lock, including headless runs. */
+    await context.addInitScript({path:path.join(projectRoot,'tests','browser','input-safety.js')});
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));

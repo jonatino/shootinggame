@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PROXY CLIMB — RPG DESTRUCTION</title>
 <style>
   html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:ui-monospace,Menlo,Consolas,monospace}
@@ -16,8 +17,10 @@
   #cross::before,#cross::after{content:'';position:absolute;background:rgba(255,210,140,.85);box-shadow:0 0 3px #000}
   #cross::before{left:50%;top:0;width:2px;height:100%;margin-left:-1px}
   #cross::after{top:50%;left:0;height:2px;width:100%;margin-top:-1px}
-  #cross.recoil{animation:crossRecoil 0.14s ease-out}
-  @keyframes crossRecoil{0%{transform:scale(1.6)}100%{transform:scale(1)}}
+  #cross.recoil-a{animation:crossRecoilA 0.14s ease-out}
+  #cross.recoil-b{animation:crossRecoilB 0.14s ease-out}
+  @keyframes crossRecoilA{0%{transform:scale(1.6)}100%{transform:scale(1)}}
+  @keyframes crossRecoilB{0%{transform:scale(1.6)}100%{transform:scale(1)}}
   #lowhp{position:fixed;inset:0;pointer-events:none;z-index:7;opacity:0;transition:opacity .5s;background:radial-gradient(ellipse at center,transparent 55%,rgba(180,20,20,.55) 100%)}
   #lowhp.pulse{animation:lphp 0.9s ease-in-out infinite}
   @keyframes lphp{0%,100%{opacity:.55}50%{opacity:.95}}
@@ -26,27 +29,56 @@
   #marker::before,#marker::after{content:'';position:absolute;background:rgba(255,70,60,.95);box-shadow:0 0 3px #000}
   #marker::before{left:50%;top:0;width:3px;height:100%;margin-left:-1.5px;transform:rotate(45deg)}
   #marker::after{left:50%;top:0;width:3px;height:100%;margin-left:-1.5px;transform:rotate(-45deg)}
-  #marker.show{opacity:1;animation:mark 0.18s ease-out}
-  @keyframes mark{0%{transform:scale(1.4)}100%{transform:scale(0.8)}}
+  #marker.show-a{opacity:1;animation:markA 0.18s ease-out}
+  #marker.show-b{opacity:1;animation:markB 0.18s ease-out}
+  @keyframes markA{0%{transform:scale(1.4)}100%{transform:scale(0.8)}}
+  @keyframes markB{0%{transform:scale(1.4)}100%{transform:scale(0.8)}}
   #hint{position:fixed;bottom:64px;width:100%;text-align:center;color:#fff;font-size:15px;letter-spacing:1px;text-shadow:0 1px 3px #000;pointer-events:none;z-index:5}
   #hint.bad{color:#ff6b5e}
   #hint.action::before{content:'SPACE';display:inline-block;margin-right:9px;padding:3px 8px;border:1px solid rgba(255,255,255,.85);border-radius:3px;background:rgba(8,10,12,.78);box-shadow:0 1px 4px rgba(0,0,0,.55);font-size:11px;font-weight:700;letter-spacing:.7px;vertical-align:2px}
-  #kill{position:fixed;bottom:14px;right:14px;color:#ffd479;background:rgba(10,12,14,.7);padding:6px 10px;border-radius:6px;font-size:12px;pointer-events:none;z-index:5}
+  #kill{position:fixed;bottom:104px;right:12px;color:#ffd479;background:rgba(10,12,14,.7);padding:6px 10px;border-radius:6px;font-size:12px;pointer-events:none;z-index:5}
+  #perf{position:fixed;right:12px;bottom:12px;width:184px;color:#6ee7a2;background:rgba(8,10,12,.82);padding:8px 9px 7px;border:1px solid rgba(255,255,255,.09);border-radius:7px;box-shadow:0 2px 12px rgba(0,0,0,.35);pointer-events:none;z-index:5;font-variant-numeric:tabular-nums}
+  #perf-head{display:flex;align-items:baseline;justify-content:space-between;line-height:1}
+  #fps-value{font-size:14px;font-weight:800;letter-spacing:.25px}
+  #frametime-value{color:#cbd3da;font-size:11px}
+  #frametime-chart{display:block;width:184px;height:48px;margin-top:6px}
+  #frametime-chart .grid{stroke:rgba(255,255,255,.12);stroke-width:1;stroke-dasharray:2 3;vector-effect:non-scaling-stroke}
+  #frametime-chart .target{stroke:rgba(255,212,121,.28)}
+  #frametime-graph{fill:none;stroke:#6ee7a2;stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke}
+  #perf.warn #fps-value,#perf.warn #frametime-graph{color:#ffd479;stroke:#ffd479}
+  #perf.bad #fps-value,#perf.bad #frametime-graph{color:#ff756b;stroke:#ff756b}
+  #perf.paused #fps-value{color:#a7b0b8}
+  #perf.paused #frametime-graph{stroke:#77818a}
   #load{position:fixed;inset:0;background:#0c0e10;color:#cfe8ff;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:20;font-size:14px;letter-spacing:1px}
   #load .big{font-size:22px;margin-bottom:14px;color:#fff}
   #start{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(5,6,8,.45);color:#fff;font-size:18px;letter-spacing:2px;z-index:15;cursor:pointer}
+  .start-card{box-sizing:border-box;width:min(440px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;padding:28px;background:rgba(12,17,22,.96);border:1px solid #43505c;border-radius:12px;box-shadow:0 16px 60px #0008;cursor:default;letter-spacing:0}
+  .start-card h1{margin:0 0 10px;color:#ffd479;font-size:25px;letter-spacing:2px}
+  .start-card p{color:#b8c5cf;font-size:13px;line-height:1.65;margin:0 0 20px}
+  #play-button{width:100%;border:0;border-radius:5px;padding:13px;color:#171c21;background:#ffd479;font:700 14px ui-monospace,monospace;letter-spacing:1px;cursor:pointer}
+  #play-button:hover{background:#ffe5ad}
+  #settings-panel{margin-top:20px;font-size:12px;letter-spacing:0;color:#dce4ea}
+  #settings-panel summary{cursor:pointer;padding:4px 0;color:#cbd8e2}
+  #settings-panel label{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:15px;line-height:1.4}
+  #settings-panel input[type=range]{width:128px;accent-color:#ffd479}
+  #settings-panel input[type=checkbox]{accent-color:#ffd479;width:17px;height:17px}
+  #settings-panel select{max-width:170px;background:#202a34;color:#fff;border:1px solid #566574;border-radius:4px;padding:6px;font:inherit}
+  #settings-panel .setting-note{margin:14px 0 0;font-size:11px;color:#97a8b7}
+  button:focus-visible,summary:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid #ffd479;outline-offset:4px}
+  @media(max-width:720px){#ctl{font-size:10px;max-width:46vw;padding:7px}#stats{font-size:10px;min-width:0;max-width:35vw}#hint{font-size:12px}}
   #err{position:fixed;top:0;left:0;right:0;background:#7a1020;color:#fff;padding:8px 14px;font-size:13px;display:none;z-index:50}
 </style>
 </head>
 <body>
 <div id="err"></div>
 <div id="ctl">
-  <b>WASD</b> move &nbsp;<b>SHIFT</b> sprint &nbsp;<b>SHIFT+W</b> climb wall &nbsp;<b>C</b> climb down / grab ledge &nbsp;<b>S</b> let go &nbsp;<b>SPACE</b> jump / vault when prompted<br>
-  <b>mouse</b> look &nbsp;<b>LMB</b> shoot (∞ ammo) &nbsp;<b>1/2/3/4</b> pistol/rifle/shotgun/RPG &nbsp;<b>M</b> audio<br>
+  <b>WASD</b> move &nbsp;<b>SHIFT</b> sprint &nbsp;<b>SHIFT+W</b> climb &nbsp;<b>C</b> climb down / grab ledge &nbsp;<b>S</b> let go &nbsp;<b>SPACE</b> jump / vault / climb on top<br>
+  <b>mouse</b> look (click game to lock; RMB drag fallback) &nbsp;<b>LMB</b> shoot (∞ ammo) &nbsp;<b>1/2/3/4/5</b> pistol/rifle/shotgun/machine RPG/A-10 20mm &nbsp;<b>M</b> audio<br>
+  <b>E</b> pick up &nbsp;<b>wheel</b> camera distance &nbsp;<b>ESC</b> pause / settings<br>
   goal: blow everything up
 </div>
 <div id="stats">
-  <b id="wpn">RPG</b> &nbsp; <span id="ammo">∞ / ∞</span><br>
+  <b id="wpn">A-10 20MM CANNON</b> &nbsp; <span id="ammo">∞ / ∞</span><br>
   <span id="hp">HP 100</span>
   <div id="bar"><div id="hpfill"></div></div>
   <span id="audio">AUDIO OFF</span><br>
@@ -58,20 +90,45 @@
 <div id="lowhp"></div>
 <div id="hint"></div>
 <div id="kill">KILLS 0 · DEBRIS 0</div>
+<div id="perf" class="paused" aria-label="Frame performance">
+  <div id="perf-head"><span id="fps-value">PAUSED</span><span id="frametime-value">— ms</span></div>
+  <svg id="frametime-chart" viewBox="0 0 184 48" preserveAspectRatio="none" aria-label="Recent frame-time graph">
+    <line class="grid" x1="0" y1="16.7" x2="184" y2="16.7"></line>
+    <line class="grid target" x1="0" y1="31.3" x2="184" y2="31.3"></line>
+    <line class="grid" x1="0" y1="46" x2="184" y2="46"></line>
+    <polyline id="frametime-graph" points=""></polyline>
+  </svg>
+</div>
 <div id="load"><div class="big">PROXY CLIMB — RPG DESTRUCTION</div><div id="loadmsg">fracturing geometry…</div></div>
-<div id="start">CLICK TO PLAY</div>
+<div id="start">
+  <div class="start-card">
+    <h1 id="start-title">PROXY CLIMB</h1>
+    <p>A playground for movement and destruction.<br>Climb the skyline. Take it apart. Unlimited ammo.</p>
+    <button id="play-button" type="button">CLICK TO PLAY</button>
+    <details id="settings-panel">
+      <summary>Controls &amp; graphics</summary>
+      <label for="sensitivity"><span>Mouse sensitivity <output id="sensitivity-value">1.00×</output></span><input id="sensitivity" type="range" min="0.25" max="2.5" step="0.05" value="1"></label>
+      <label for="invert-y">Invert vertical look<input id="invert-y" type="checkbox"></label>
+      <label for="auto-jump">Hold Space to repeat jumps<input id="auto-jump" type="checkbox" checked></label>
+      <label for="camera-motion">Camera motion<select id="camera-motion"><option value="1">Full</option><option value="0.35">Reduced</option><option value="0">Off</option></select></label>
+      <label for="quality">Graphics<select id="quality"><option value="high">High</option><option value="balanced">Balanced</option><option value="performance">Performance</option></select></label>
+      <p class="setting-note">Esc pauses the game. Settings save on this device.<br>If mouse lock is unavailable, hold the right mouse button to look.</p>
+    </details>
+  </div>
+</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="./voxel_physics.js?v=4"></script>
-<script src="./js/core.js?v=5"></script>
+<script src="./js/settings.js?v=1"></script>
+<script src="./voxel_physics.js?v=13"></script>
+<script src="./js/core.js?v=11"></script>
 <script src="./js/destruction.js?v=5"></script>
-<script src="./js/world.js?v=6"></script>
-<script src="./js/combat.js?v=7"></script>
-<script src="./js/climbing.js?v=8"></script>
-<script src="./js/player-controller.js?v=25"></script>
-<script src="./js/player-character.js?v=14"></script>
-<script src="./js/ui-effects.js?v=9"></script>
-<script src="./js/rigid-body.js?v=6"></script>
-<script src="./js/actors.js?v=5"></script>
-<script src="./js/game-loop.js?v=9"></script>
+<script src="./js/world.js?v=8"></script>
+<script src="./js/combat.js?v=15"></script>
+<script src="./js/climbing.js?v=10"></script>
+<script src="./js/player-controller.js?v=39"></script>
+<script src="./js/player-character.js?v=23"></script>
+<script src="./js/ui-effects.js?v=14"></script>
+<script src="./js/rigid-body.js?v=8"></script>
+<script src="./js/actors.js?v=8"></script>
+<script src="./js/game-loop.js?v=14"></script>
 </body>
 </html>

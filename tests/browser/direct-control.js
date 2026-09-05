@@ -34,6 +34,10 @@ window.__browserGameTest=Object.freeze({
       camera:[camYaw,camPitch],
       cameraPosition:camera.position.toArray(),
       zoom:camZoom,
+      weapon:{
+        key:playerWpn.cur,
+        label:wpnStats().displayName||wpnStats().name
+      },
       pressedKeys:Object.keys(keys).filter(code=>keys[code]).sort(),
       renderFrames:renderer.info.render.frame,
       world:voxelPhysics.stats()

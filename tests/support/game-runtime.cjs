@@ -69,7 +69,7 @@ function __resetPlayer(){
   player.vaultRecovery=0;player.cool=0;player.grace=0;
   player.jumpGrace=0;player.jumpBuffer=0;player.climbBuffer=0;
   player.jumpClimbActive=false;player.jumpLaunchY=0;
-  player.onGround=true;player.landingSurface=null;player.hp=100;
+  player.onGround=true;player.landingSurface=null;player.hp=100;player.respawnShield=0;
   camYaw=0;targetYaw=0;camPitch=0;targetPitch=0;
   moveFwd.set(0,0,-1);moveRight.set(1,0,0);moveDir.set(0,0,0);
   walkAmt=0;moveSpeed=0;movementAccel=0;movementAccelWorld.set(0,0,0);
@@ -183,6 +183,8 @@ window.__gameTest={
   lowVaultPrompt:direction=>canPromptLowVault(new THREE.Vector3().fromArray(direction)),
   startLowVault:(direction,speed,targetSpeed)=>
     tryLowVault(new THREE.Vector3().fromArray(direction),speed,targetSpeed),
+  quickClimbPrompt:direction=>canPromptQuickClimb(new THREE.Vector3().fromArray(direction)),
+  startQuickClimb:direction=>tryQuickClimb(new THREE.Vector3().fromArray(direction)),
   buildClimbGraph:()=>buildGraph(),
   startGrab:air=>{tryGrab(!!air);return __playerState();},
   registerVoxel:options=>voxelPhysics.registerBuilding(options),
@@ -206,11 +208,17 @@ function runScript(context, relativePath) {
 function createRuntime(options = {}) {
   const fake = createFakeBrowser(options);
   const context = vm.createContext(fake.sandbox, {name: 'shooting-game-test'});
-  const scripts = options.fullWorld ? fullScripts : minimalScripts;
+  const scripts = options.fullWorld ? fullScripts : (options.gameplay ?
+    [...fullScripts.filter(script=>script!=='js/world.js'),'js/game-loop.js'] : minimalScripts);
 
+  runScript(context, 'js/settings.js');
   runScript(context, scripts[0]);
   runScript(context, scripts[1]);
-  if (!options.fullWorld) vm.runInContext(tinyWorldPrelude, context, {filename: 'tiny-world-prelude.js'});
+  if (!options.fullWorld) {
+    const prelude=options.gameplay?tinyWorldPrelude.replace(
+      'const hangFromPos=V(),hangToPos=V(),climbHoldNormal=V();',''):tinyWorldPrelude;
+    vm.runInContext(prelude, context, {filename: 'tiny-world-prelude.js'});
+  }
   for (let index = 2; index < scripts.length; index++) runScript(context, scripts[index]);
   if (!options.fullWorld) vm.runInContext(tinyWorldApi, context, {filename: 'tiny-world-api.js'});
 
